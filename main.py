@@ -481,12 +481,12 @@ class Main(star.Star):
 
     @filter.llm_tool(name="lark_emoji_reply")
     async def lark_emoji_reply(self, event: AstrMessageEvent, emoji: str):
-        """飞书表情回复工具。当你想对用户的消息表达态度（如点赞、开心、收到）时，可以使用此工具贴一个表情。
+        """飞书表情回复工具。仅在非常有必要对用户的消息表达强烈情感（如点赞、开心、收到）且无需文字回复时使用。请勿滥用此工具，不要对每条消息都进行表情回复。
         
         常用表情代码值：
         THUMBSUP(点赞), THUMBSDOWN(踩), FIGHTON(加油), THANKS(感谢), HEART(比心), OK(OK), YES(Yes/V手势), NO(NO/X手势)
         CLAP(鼓掌), LAUGH(大笑), WAH(哇), CRY(流泪), GLANCE(狗头/斜眼笑), DULL(呆无辜), KISS(飞吻), ROSE(玫瑰)
-        DONE(完成), CHECK(勾), CROSS(叉), WAVE(挥手), BLUSH(脸红), SOB(大哭), JOY(破涕为笑)
+        DONE(完成), CHECK(勾), CROSS(叉), WAVE(再见), BLUSH(脸红), SOB(大哭), JOY(破涕为笑)
         BEER(啤酒), CAKE(蛋糕), JIAYI(+1), HIGHFIVE(击掌), EYES(围观), AWESOME(666), FIRE(给力/火), MUSCLE(强/肌肉)
         SHAKE(握手), SALUTE(敬礼), WINK(眨眼), SHHH(嘘), PROUD(得意), HEARTBROKEN(心碎), POOP(便便), GIFT(礼物)
         CUCUMBER(吃瓜), SLAP(打脸), SPIT(吐血), ANGRY(生气), WHOA(震惊), SWEAT(汗), EATING(吃饭), SLEEP(睡觉)
