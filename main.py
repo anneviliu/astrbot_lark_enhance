@@ -72,6 +72,56 @@ class Main(star.Star):
             
         return None
 
+    def _clean_content(self, content_str: str) -> str:
+        """清洗消息内容，尝试从 JSON/Python-repr 中提取纯文本"""
+        if not content_str:
+            return content_str
+            
+        content_str = content_str.strip()
+        
+        # 快速检查：如果不是以 [ 或 { 开头，大概率是普通文本
+        if not (content_str.startswith("[") or content_str.startswith("{")):
+            return content_str
+
+        # 尝试解析为 JSON
+        try:
+            data = json.loads(content_str)
+            return self._extract_text_from_data(data)
+        except json.JSONDecodeError:
+            pass
+            
+        # 尝试解析为 Python 字面量 (处理单引号情况)
+        try:
+            data = ast.literal_eval(content_str)
+            return self._extract_text_from_data(data)
+        except (ValueError, SyntaxError):
+            pass
+            
+        # 如果解析失败，原样返回（或者可以考虑正则提取，但这里先保守处理）
+        return content_str
+
+    def _extract_text_from_data(self, data: Any) -> str:
+        """递归从 list/dict 中提取 text 字段"""
+        texts = []
+        if isinstance(data, list):
+            for item in data:
+                texts.append(self._extract_text_from_data(item))
+        elif isinstance(data, dict):
+            if "type" in data and data["type"] == "text" and "text" in data:
+                return data["text"]
+            # 也可以遍历 values 递归，但目前主要针对 AstrBot 消息格式
+            # 如果是其他结构的 dict，这里暂不处理
+        elif isinstance(data, str):
+            # 有时候 content 本身是 JSON 字符串，需要二次解析？
+            # 观察用户日志：{'type': 'text', 'text': "[{'type': ...}]"}
+            # 这里如果不做递归解析，可能会漏。但为了防止死循环或过度解析，暂时只做一层。
+            # 如果 data 是字符串，尝试再次清洗？
+            if data.strip().startswith("[") or data.strip().startswith("{"):
+                 return self._clean_content(data)
+            return data
+            
+        return "".join(texts)
+
     async def _parse_lark_message_body(self, lark_client: Any, body: Any) -> str | None:
         """解析 Lark 消息体 content"""
         content = getattr(body, "content", None)
@@ -240,8 +290,10 @@ class Main(star.Star):
                     
                     # 尝试从 raw_message 中解析更原始内容，或者直接用 message_str
                     # 这里的 message_str 已经是经过前面 At 增强后的版本
-                    content_str = event.message_str
+                    # 关键修改：尝试清洗 message_str，防止脏数据污染
                     
+                    content_str = self._clean_content(event.message_str)
+
                     record_item = {
                         "msg_id": event.message_obj.message_id,
                         "time": time_str,
@@ -301,16 +353,29 @@ class Main(star.Star):
                 sender_name = "GH 助手"
                 
                 # event.message_str 在发送后通常是发送的内容
-                content_str = event.message_str
-                # 如果没有 message_str，尝试从 result 中获取
-                if not content_str:
-                    result = event.get_result()
-                    if result:
-                        # 尝试从 result 中提取文本
-                        from astrbot.api.message_components import Plain
-                        chain = result.chain
+                # 警告：AstrMessageEvent 在发送后，message_str 可能仍然是用户发送的内容，而不是 Bot 回复的内容。
+                # 我们需要优先从 result 中获取。
+                
+                content_str = ""
+                result = event.get_result()
+                if result:
+                    # 尝试从 result 中提取文本
+                    from astrbot.api.message_components import Plain
+                    chain = result.chain
+                    if chain:
                         texts = [c.text for c in chain if isinstance(c, Plain)]
                         content_str = "".join(texts)
+                
+                if not content_str:
+                    # 如果 result 为空，再尝试 message_str，但要小心
+                    # 为了避免记录用户的话，我们加上日志调试
+                    logger.debug(f"[lark_enhance] Result chain empty. event.message_str: {event.message_str}")
+                    # 只有当 message_str 与 event.message_obj.message_str (用户原始输入) 不同时才使用？
+                    # 或者干脆如果不从 result 拿到就不记录了，宁缺毋滥。
+                    return 
+
+                # 清洗内容
+                content_str = self._clean_content(content_str)
 
                 if not content_str:
                     return

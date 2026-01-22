@@ -11,12 +11,14 @@ The plugin operates as a `Star` extension within AstrBot, utilizing the event-dr
 *   **Event Interception**: Listens for `LARK` platform events via `on_message` to:
     *   Preprocess message content (e.g., resolving OpenIDs to nicknames).
     *   **Local History Recording**: Automatically records group chat messages into an in-memory sliding window (`self.group_history`) to provide context for future interactions.
+    *   **Content Cleaning**: Implements robust cleaning logic (`_clean_content`) to prevent JSON-formatted strings or internal message representations from polluting the conversation history, ensuring the LLM sees clean text.
 *   **Prompt Injection**: Uses `on_llm_request` to inject additional context into the LLM prompt:
     *   **Quoted Content**: If the user replies to a message, the quoted content is fetched and injected.
     *   **Group Context**: Recent group chat history (from local memory) is injected to help the LLM understand the ongoing conversation, even if it wasn't directly mentioned.
     *   **Context Cleaning**: Cleans up `tool_calls` and `tool_result` in the conversation history to prevent LLM errors (e.g., Gemini's `thought_signature` issue) and ensures tool execution results are presented in a friendly format.
 *   **Tool Registration**: Exposes `lark_emoji_reply` as a tool for the LLM to interact with Lark's reaction system.
     *   **Silent Execution**: The tool returns `None` upon success, preventing the LLM from generating redundant follow-up text (e.g., "I've added the emoji") while still recording the action in the history.
+*   **Self-Message Recording**: Listens for `after_message_sent` events to record the bot's own responses into the group history, ensuring a bidirectional context.
 *   **API Integration**: Directly accesses the `lark_oapi` client instance injected into `AstrMessageEvent` to perform API calls (fetching user info, message details).
 
 ## 2. Build & Commands
