@@ -484,7 +484,31 @@ class Main(star.Star):
         """飞书表情回复工具。当你想对用户的消息表达态度（如点赞、开心、收到）时，可以使用此工具贴一个表情。
         
         Args:
-            emoji(string): 表情代码。常用值：THUMBSUP(点赞), HEART(比心), OK(好的), LAUGH(大笑), CLAP(鼓掌), THANKS(感谢), WAH(哇), CRY(流泪), GLANCE(狗头), DULL(呆无辜)。
+            emoji(string): 表情代码。常用值：
+            - THUMBSUP(点赞)
+            - THUMBSDOWN(踩)
+            - FIGHTON(加油)
+            - THANKS(感谢)
+            - HEART(比心)
+            - OK(OK)
+            - NO(NO)
+            - CLAP(鼓掌)
+            - LAUGH(大笑)
+            - WAH(哇)
+            - CRY(流泪)
+            - GLANCE(狗头/斜眼笑)
+            - DULL(呆无辜)
+            - KISS(飞吻)
+            - ROSE(玫瑰)
+            - DONE(完成)
+            - CHECK(勾)
+            - CROSS(叉)
+            - WAVE(挥手)
+            - BLUSH(脸红)
+            - SOB(大哭)
+            - JOY(破涕为笑)
+            - BEER(啤酒)
+            - CAKE(蛋糕)
         """
         if not self._is_lark_event(event):
             return "不是飞书平台，无法使用表情回复。"
