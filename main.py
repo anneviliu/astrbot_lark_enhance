@@ -469,7 +469,8 @@ class Main(star.Star):
         
         if prompts_to_inject:
              final_inject = "\n----------------\n".join(prompts_to_inject) + "\n----------------\n\n"
-             req.prompt = final_inject + (req.prompt or "")
+             # 修改为注入到 System Prompt 中，避免污染历史 Context
+             req.system_prompt = (req.system_prompt or "") + "\n\n" + final_inject
 
         # 打印发送给 LLM 的完整内容
         logger.info("=" * 20 + " [lark_enhance] LLM Request Payload " + "=" * 20)
