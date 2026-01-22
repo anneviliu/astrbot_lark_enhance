@@ -2,15 +2,21 @@
 
 ## 1. Project Overview
 
-`lark_enhance` is an AstrBot plugin designed to improve the integration with the Lark (Feishu) platform. It enriches the conversational context by resolving user information, handling quoted messages, and providing platform-specific capabilities like emoji reactions.
+`lark_enhance` is an AstrBot plugin designed to improve the integration with the Lark (Feishu) platform. It enriches the conversational context by resolving user information, handling quoted messages, maintaining group chat history, and providing platform-specific capabilities like emoji reactions.
 
 ### Core Architecture
 
 The plugin operates as a `Star` extension within AstrBot, utilizing the event-driven architecture to intercept and modify message flows.
 
-*   **Event Interception**: Listens for `LARK` platform events via `on_message` to preprocess message content (e.g., resolving OpenIDs to nicknames).
-*   **Prompt Injection**: Uses `on_llm_request` to inject additional context (like quoted message content) into the LLM prompt.
+*   **Event Interception**: Listens for `LARK` platform events via `on_message` to:
+    *   Preprocess message content (e.g., resolving OpenIDs to nicknames).
+    *   **Local History Recording**: Automatically records group chat messages into an in-memory sliding window (`self.group_history`) to provide context for future interactions.
+*   **Prompt Injection**: Uses `on_llm_request` to inject additional context into the LLM prompt:
+    *   **Quoted Content**: If the user replies to a message, the quoted content is fetched and injected.
+    *   **Group Context**: Recent group chat history (from local memory) is injected to help the LLM understand the ongoing conversation, even if it wasn't directly mentioned.
+    *   **Context Cleaning**: Cleans up `tool_calls` and `tool_result` in the conversation history to prevent LLM errors (e.g., Gemini's `thought_signature` issue) and ensures tool execution results are presented in a friendly format.
 *   **Tool Registration**: Exposes `lark_emoji_reply` as a tool for the LLM to interact with Lark's reaction system.
+    *   **Silent Execution**: The tool returns `None` upon success, preventing the LLM from generating redundant follow-up text (e.g., "I've added the emoji") while still recording the action in the history.
 *   **API Integration**: Directly accesses the `lark_oapi` client instance injected into `AstrMessageEvent` to perform API calls (fetching user info, message details).
 
 ## 2. Build & Commands
@@ -19,11 +25,14 @@ Since this is a plugin, it runs within the AstrBot environment.
 
 ### Development
 *   **Location**: `data/plugins/lark_enhance/`
-*   **Dependencies**: Defined in `requirements.txt` (currently empty/implicit). Depends on `lark-oapi`.
+*   **Dependencies**: Defined in `requirements.txt`. Depends on `lark-oapi`.
 *   **Reload**: Restart AstrBot to apply changes: `uv run main.py`.
 
 ### Testing
-*   **Manual Testing**: Send messages on Lark that trigger the specific features (e.g., quote a message, @mention a user).
+*   **Manual Testing**: 
+    *   Send messages on Lark to trigger features (quote a message, @mention a user).
+    *   Test group chat context by discussing a topic and then asking the bot about it.
+    *   Test emoji reaction tool.
 *   **Logs**: Check console output for `[lark_enhance]` prefix to verify behavior.
 
 ## 3. Code Style
@@ -45,7 +54,7 @@ Follows the AstrBot core project standards.
 
 *   **Data Privacy**:
     *   Caches user nicknames in memory (`self.user_cache`) to reduce API calls.
-    *   Does not persist user data to disk.
+    *   **Group History**: Stores recent group messages in memory (`self.group_history`). This data is **ephemeral** (lost on restart) and is strictly used for context injection. It is NOT persisted to disk.
 *   **Permissions**:
     *   Checks `event.get_platform_name() == "lark"` before execution.
     *   Handles `41050` (permission denied) gracefully when fetching user info.
@@ -62,3 +71,4 @@ Configuration is managed via `_conf_schema.json` and accessible through the Astr
 | `enable_group_info` | bool | `true` | Inject group name/desc (planned). |
 | `enable_context_cleaner` | bool | `true` | Clean `tool_calls` to fix Gemini errors. |
 | `enable_streaming_card` | bool | `false` | Use card messages for streaming (planned). |
+| `history_inject_count` | int | `20` | Number of recent group messages to record locally and inject into context. Set to 0 to disable. |
