@@ -272,6 +272,65 @@ class Main(star.Star):
                 event.set_extra("lark_quoted_content", quoted_content)
                 event.set_extra("lark_quoted_sender", sender_name) # 存储发送者名字
 
+    @filter.after_message_sent()
+    async def on_message_sent(self, event: AstrMessageEvent):
+        """记录机器人自己发送的消息到群聊历史"""
+        if not self._is_lark_event(event):
+            return
+            
+        group_id = event.message_obj.group_id
+        if not group_id:
+            return
+
+        try:
+            # 获取配置的历史数量
+            history_count = 20
+            if self.config:
+                history_count = self.config.get("history_inject_count", 20)
+            
+            if history_count > 0:
+                # 确保 deque 长度符合配置
+                if self.group_history[group_id].maxlen != history_count:
+                    # 如果配置变更，需要重建 deque (保留旧数据)
+                    old_data = list(self.group_history[group_id])
+                    self.group_history[group_id] = deque(old_data, maxlen=history_count)
+
+                # 构造历史记录项
+                time_str = datetime.datetime.now().strftime("%H:%M:%S")
+                # 机器人自己发送的消息，sender 为 "GH 助手"
+                sender_name = "GH 助手"
+                
+                # event.message_str 在发送后通常是发送的内容
+                content_str = event.message_str
+                # 如果没有 message_str，尝试从 result 中获取
+                if not content_str:
+                    result = event.get_result()
+                    if result:
+                        # 尝试从 result 中提取文本
+                        from astrbot.api.message_components import Plain
+                        chain = result.chain
+                        texts = [c.text for c in chain if isinstance(c, Plain)]
+                        content_str = "".join(texts)
+
+                if not content_str:
+                    return
+
+                # 使用当前时间戳作为 msg_id (因为发送后不一定能马上拿到 msg_id，且主要是为了去重和排序，用时间戳近似也可以)
+                # 或者我们可以留空 msg_id，但在读取时需要处理
+                msg_id = f"sent_{int(datetime.datetime.now().timestamp())}"
+                
+                record_item = {
+                    "msg_id": msg_id,
+                    "time": time_str,
+                    "sender": sender_name,
+                    "content": content_str
+                }
+                
+                self.group_history[group_id].append(record_item)
+                logger.debug(f"[lark_enhance] Recorded SELF message for group {group_id}: {content_str[:20]}...")
+        except Exception as e:
+            logger.error(f"[lark_enhance] Failed to record self message history: {e}")
+
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
         """在请求 LLM 前，将增强的信息注入到 prompt 中。"""
