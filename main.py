@@ -534,6 +534,8 @@ class Main(star.Star):
             - SLEEP(睡觉)
             - SMART(机智)
             - MURMUR(暗中观察)
+            - GET(Get!)
+            - LUCK(祝好/锦鲤)
             - HUG(拥抱)
             - SUN(太阳)
             - MOON(月亮)
