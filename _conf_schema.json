@@ -1,0 +1,32 @@
+{
+    "enable_real_name": {
+        "description": "是否启用真实姓名转换（将 ID 转换为昵称）",
+        "type": "bool",
+        "default": true
+    },
+    "enable_quoted_content": {
+        "description": "是否启用引用消息增强（获取并注入引用消息内容）",
+        "type": "bool",
+        "default": true
+    },
+    "enable_group_info": {
+        "description": "是否启用群组信息注入（注入群名称和描述到 System Prompt）",
+        "type": "bool",
+        "default": true
+    },
+    "enable_context_cleaner": {
+        "description": "是否启用 Context 清洗（规避 Gemini thought_signature 报错）",
+        "type": "bool",
+        "default": true
+    },
+    "enable_streaming_card": {
+        "description": "是否启用卡片流式输出（使用飞书消息卡片实现打字机效果）",
+        "type": "bool",
+        "default": false
+    },
+    "history_inject_count": {
+        "description": "本地记录群聊历史消息的数量（0 表示禁用）。启用后，插件将自动记录群组最近的 N 条消息，并在对话时提供给 LLM 作为背景上下文。",
+        "type": "int",
+        "default": 20
+    }
+}
