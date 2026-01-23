@@ -1,26 +1,29 @@
 from __future__ import annotations
 
-import asyncio
-import json
-import ast
+import atexit
 import copy
 import datetime
-import os
+import json
 import re
 import time
 import uuid
 from collections import OrderedDict, deque, defaultdict
-from typing import Any, AsyncGenerator
+from pathlib import Path
+from typing import Any
 
-from astrbot.api import star
+from astrbot.api import logger, star
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import At, Plain
 from astrbot.api.provider import ProviderRequest
-from astrbot.core import logger
+from astrbot.api.star import StarTools
 from astrbot.core.message.message_event_result import ResultContentType
 
 # 保存原始的 send_streaming 方法
 _original_lark_send_streaming = None
+# 全局配置引用（用于 monkey patch）
+_streaming_config: dict | None = None
+# 全局 clean_content 函数引用
+_clean_content_func = None
 
 
 async def _empty_generator():
@@ -189,7 +192,7 @@ class LarkStreamingCard:
             response = await self.lark_client.im.v1.message.apatch(request)
 
             if response.success():
-                logger.debug(f"[lark_enhance] Finalized streaming card")
+                logger.debug("[lark_enhance] Finalized streaming card")
                 return True
             else:
                 logger.warning(
@@ -206,17 +209,23 @@ class Main(star.Star):
     _CACHE_TTL = 300  # 5 分钟
     # 历史保存防抖间隔 (秒)
     _SAVE_DEBOUNCE = 5
+    # 用户缓存最大容量
+    _USER_CACHE_MAX_SIZE = 5000
+    # 内容清洗最大长度限制（防止解析炸弹）
+    _CLEAN_CONTENT_MAX_LEN = 10000
 
     def __init__(self, context: star.Context, config: dict | None = None):
         super().__init__(context)
         self.config = config or {}
 
-        # open_id -> nickname
-        self.user_cache: dict[str, str] = {}
+        # open_id -> (nickname, cache_time)
+        self.user_cache: OrderedDict[str, tuple[str, float]] = OrderedDict()
         # group_id -> {nickname -> open_id} (群成员映射)
         self.group_members_cache: dict[str, dict[str, str]] = {}
         # group_id -> cache_time (缓存时间戳)
         self._group_members_cache_time: dict[str, float] = {}
+        # group_id -> compiled regex pattern
+        self._mention_pattern_cache: dict[str, tuple[re.Pattern, float]] = {}
         # group_id -> group info cache
         self.group_info_cache: dict[str, dict] = {}
         # group_id -> cache_time
@@ -231,9 +240,9 @@ class Main(star.Star):
             lambda: deque(maxlen=self._history_maxlen)
         )
 
-        # 持久化存储路径
-        self._data_dir = os.path.join(os.path.dirname(__file__), "data")
-        self._history_file = os.path.join(self._data_dir, "group_history.json")
+        # 持久化存储路径（使用框架规范方法）
+        self._data_dir: Path = StarTools.get_data_dir("astrbot_plugin_lark_enhance")
+        self._history_file: Path = self._data_dir / "group_history.json"
 
         # 历史保存防抖
         self._last_save_time: float = 0
@@ -242,13 +251,26 @@ class Main(star.Star):
         # 加载持久化的历史记录
         self._load_history()
 
+        # 注册退出时保存
+        atexit.register(self._atexit_save)
+
+        # 设置全局配置引用（用于 monkey patch）
+        global _streaming_config, _clean_content_func
+        _streaming_config = self.config
+        _clean_content_func = self._clean_content
+
         # 设置流式卡片的 monkey patch
         if self.config.get("enable_streaming_card", False):
             self._setup_streaming_patch()
 
+    def _atexit_save(self):
+        """程序退出时保存历史记录"""
+        if self._pending_save or self.group_history:
+            self._save_history(force=True)
+
     def _load_history(self):
         """从文件加载历史记录"""
-        if not os.path.exists(self._history_file):
+        if not self._history_file.exists():
             return
 
         try:
@@ -276,11 +298,12 @@ class Main(star.Star):
 
             _original_lark_send_streaming = LarkMessageEvent.send_streaming
 
-            # 保存 self 引用给闭包使用
-            plugin_instance = self
-
             async def patched_send_streaming(event_self, generator, use_fallback: bool = False):
                 """Monkey-patched send_streaming 方法，使用流式卡片"""
+                # 检查全局配置是否启用
+                if not _streaming_config or not _streaming_config.get("enable_streaming_card", False):
+                    return await _original_lark_send_streaming(event_self, generator, use_fallback)
+
                 # 检查是否是飞书事件
                 if not hasattr(event_self, "bot") or event_self.bot is None:
                     return await _original_lark_send_streaming(event_self, generator, use_fallback)
@@ -311,11 +334,15 @@ class Main(star.Star):
                             for comp in chain.chain:
                                 if isinstance(comp, Plain):
                                     full_content += comp.text
+                                elif hasattr(comp, "type"):
+                                    # 对非文本组件添加占位符
+                                    full_content += f" [{comp.type}] "
                             # 更新卡片
                             await streaming_card.update_card(full_content)
 
                     # 清洗最终内容
-                    full_content = plugin_instance._clean_content(full_content)
+                    if _clean_content_func:
+                        full_content = _clean_content_func(full_content)
 
                     # 完成卡片
                     await streaming_card.finalize_card(full_content)
@@ -349,7 +376,7 @@ class Main(star.Star):
             return
 
         try:
-            os.makedirs(self._data_dir, exist_ok=True)
+            self._data_dir.mkdir(parents=True, exist_ok=True)
 
             data = {
                 group_id: list(items)
@@ -402,15 +429,44 @@ class Main(star.Star):
         """检查缓存是否有效"""
         return time.time() - cache_time < self._CACHE_TTL
 
-    async def _get_user_nickname(
-        self, lark_client: Any, open_id: str, event: AstrMessageEvent = None
-    ) -> str | None:
+    def _get_user_from_cache(self, open_id: str) -> str | None:
+        """从缓存获取用户昵称（带 TTL 检查）"""
         if open_id in self.user_cache:
-            return self.user_cache[open_id]
+            nickname, cache_time = self.user_cache[open_id]
+            if self._is_cache_valid(cache_time):
+                # 移动到末尾（LRU）
+                self.user_cache.move_to_end(open_id)
+                return nickname
+            else:
+                # 缓存过期，删除
+                del self.user_cache[open_id]
+        return None
+
+    def _set_user_cache(self, open_id: str, nickname: str):
+        """设置用户缓存（带容量限制）"""
+        # 如果已存在，先删除（保证 move_to_end 效果）
+        if open_id in self.user_cache:
+            del self.user_cache[open_id]
+
+        # 检查容量，移除最老的条目
+        while len(self.user_cache) >= self._USER_CACHE_MAX_SIZE:
+            self.user_cache.popitem(last=False)
+
+        self.user_cache[open_id] = (nickname, time.time())
+
+    async def _get_user_nickname(
+        self, lark_client: Any, open_id: str, event: AstrMessageEvent | None = None
+    ) -> str | None:
+        # 检查缓存
+        cached = self._get_user_from_cache(open_id)
+        if cached is not None:
+            return cached
 
         # 避免查询机器人自己
         if event and open_id == event.get_self_id():
-            return self.config.get("bot_name", "助手")
+            bot_name = self.config.get("bot_name", "助手")
+            self._set_user_cache(open_id, bot_name)
+            return bot_name
 
         logger.debug(f"[lark_enhance] Querying Lark user info for open_id: {open_id}")
 
@@ -435,13 +491,16 @@ class Main(star.Star):
 
             if response.success() and response.data and response.data.user:
                 nickname = response.data.user.name
-                self.user_cache[open_id] = nickname
+                self._set_user_cache(open_id, nickname)
                 return nickname
             elif response.code == 41050:
                 logger.debug(
                     f"获取飞书用户信息失败 (权限不足): {response.msg}。可能是机器人ID或外部联系人。"
                 )
-                self.user_cache[open_id] = f"用户({open_id[-4:]})"
+                # 使用占位名并缓存，同时返回该占位名
+                placeholder = f"用户({open_id[-4:]})"
+                self._set_user_cache(open_id, placeholder)
+                return placeholder
             else:
                 logger.warning(f"获取飞书用户信息失败: {response.code} - {response.msg}")
         except Exception as e:
@@ -540,7 +599,7 @@ class Main(star.Star):
                         name = getattr(member, "name", None)
                         if member_id and name:
                             members_map[name] = member_id
-                            self.user_cache[member_id] = name
+                            self._set_user_cache(member_id, name)
 
                 if (
                     response.data
@@ -553,6 +612,8 @@ class Main(star.Star):
 
             self.group_members_cache[chat_id] = members_map
             self._group_members_cache_time[chat_id] = time.time()
+            # 清除该群的正则缓存
+            self._mention_pattern_cache.pop(chat_id, None)
             logger.info(
                 f"[lark_enhance] Loaded {len(members_map)} members for group {chat_id}"
             )
@@ -569,6 +630,10 @@ class Main(star.Star):
 
         content_str = content_str.strip()
 
+        # 长度限制，防止解析炸弹
+        if len(content_str) > self._CLEAN_CONTENT_MAX_LEN:
+            return content_str
+
         # 快速检查：如果不是以 [ 或 { 开头，大概率是普通文本
         if not (content_str.startswith("[") or content_str.startswith("{")):
             return content_str
@@ -576,42 +641,38 @@ class Main(star.Star):
         # 尝试解析为 JSON
         try:
             data = json.loads(content_str)
-            result = self._extract_text_from_data(data)
+            result = self._extract_text_from_data(data, depth=0)
             return result if result else content_str
         except json.JSONDecodeError:
             pass
 
-        # 尝试解析为 Python 字面量 (处理单引号情况)
-        try:
-            data = ast.literal_eval(content_str)
-            result = self._extract_text_from_data(data)
-            return result if result else content_str
-        except (ValueError, SyntaxError):
-            pass
-
+        # 不再使用 ast.literal_eval，避免安全风险
+        # 如果 JSON 解析失败，直接返回原内容
         return content_str
 
-    def _extract_text_from_data(self, data: Any) -> str:
+    def _extract_text_from_data(self, data: Any, depth: int = 0) -> str:
         """递归从 list/dict 中提取 text 字段"""
+        # 深度限制，防止过深嵌套
+        if depth > 10:
+            return ""
+
         texts = []
         if isinstance(data, list):
             for item in data:
-                result = self._extract_text_from_data(item)
+                result = self._extract_text_from_data(item, depth + 1)
                 if result:
                     texts.append(result)
         elif isinstance(data, dict):
             if "text" in data:
                 text_value = data["text"]
                 if isinstance(text_value, str):
-                    if text_value.strip().startswith(
-                        "["
-                    ) or text_value.strip().startswith("{"):
+                    if text_value.strip().startswith("[") or text_value.strip().startswith("{"):
                         return self._clean_content(text_value)
                     return text_value
                 return str(text_value)
             for value in data.values():
                 if isinstance(value, (list, dict)):
-                    result = self._extract_text_from_data(value)
+                    result = self._extract_text_from_data(value, depth + 1)
                     if result:
                         texts.append(result)
         elif isinstance(data, str):
@@ -1012,6 +1073,29 @@ class Main(star.Star):
             logger.error(f"[lark_enhance] React failed: {e}")
             return f"添加 {emoji} 表情失败"
 
+    def _get_mention_pattern(self, group_id: str, members_map: dict[str, str]) -> re.Pattern | None:
+        """获取或创建 @ 提及匹配的正则表达式（带缓存）"""
+        # 检查缓存
+        if group_id in self._mention_pattern_cache:
+            pattern, cache_time = self._mention_pattern_cache[group_id]
+            if self._is_cache_valid(cache_time):
+                return pattern
+
+        if not members_map:
+            return None
+
+        # 构建正则模式，添加边界检查避免误匹配
+        sorted_names = sorted(members_map.keys(), key=len, reverse=True)
+        if not sorted_names:
+            return None
+
+        escaped_names = [re.escape(name) for name in sorted_names]
+        # 使用负向后行断言，确保 @ 前面不是字母数字或其他 @
+        pattern = re.compile(r"(?<![a-zA-Z0-9@])@(" + "|".join(escaped_names) + r")(?![a-zA-Z0-9])")
+
+        self._mention_pattern_cache[group_id] = (pattern, time.time())
+        return pattern
+
     @filter.on_decorating_result()
     async def on_decorating_result(self, event: AstrMessageEvent):
         """在消息发送前处理，清洗消息格式并将文本中的 @名字 转换为飞书 At 组件"""
@@ -1062,13 +1146,10 @@ class Main(star.Star):
             )
             return
 
-        # 构建正则模式
-        sorted_names = sorted(members_map.keys(), key=len, reverse=True)
-        if not sorted_names:
+        # 获取缓存的正则模式
+        pattern = self._get_mention_pattern(group_id, members_map)
+        if not pattern:
             return
-
-        escaped_names = [re.escape(name) for name in sorted_names]
-        pattern = re.compile(r"@(" + "|".join(escaped_names) + r")")
 
         new_chain = []
         for comp in result.chain:
@@ -1105,4 +1186,3 @@ class Main(star.Star):
                 new_chain.append(comp)
 
         result.chain = new_chain
-
