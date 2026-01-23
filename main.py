@@ -1528,7 +1528,11 @@ class Main(star.Star):
             return f"好的，我已经删除了包含「{target}」的记忆（共 {deleted_count} 条）。"
 
     def _get_mention_pattern(self, group_id: str, members_map: dict[str, str]) -> re.Pattern | None:
-        """获取或创建 @ 提及匹配的正则表达式（带缓存）"""
+        """获取或创建 @ 提及匹配的正则表达式（带缓存）
+
+        匹配 @名字，同时捕获前后可能的 Markdown 格式符号（如 **、*、__、_ 等）
+        以便在转换时一并移除这些格式符号。
+        """
         # 检查缓存
         if group_id in self._mention_pattern_cache:
             pattern, cache_time = self._mention_pattern_cache[group_id]
@@ -1538,14 +1542,21 @@ class Main(star.Star):
         if not members_map:
             return None
 
-        # 构建正则模式，添加边界检查避免误匹配
+        # 构建正则模式
         sorted_names = sorted(members_map.keys(), key=len, reverse=True)
         if not sorted_names:
             return None
 
         escaped_names = [re.escape(name) for name in sorted_names]
-        # 使用负向后行断言，确保 @ 前面不是字母数字或其他 @
-        pattern = re.compile(r"(?<![a-zA-Z0-9@])@(" + "|".join(escaped_names) + r")(?![a-zA-Z0-9])")
+        # 匹配模式：可选的前置Markdown符号 + 可选空白/换行 + @ + 名字 + 可选空白/换行 + 可选的后置Markdown符号
+        # Markdown 符号：**、*、__、_、~~、`
+        md_pattern = r"(?:\*{1,2}|_{1,2}|~~|`)?"
+        ws_pattern = r"[\s]*"  # 可选的空白字符（包括换行）
+        pattern = re.compile(
+            md_pattern + ws_pattern +
+            r"@(" + "|".join(escaped_names) + r")" +
+            ws_pattern + md_pattern
+        )
 
         self._mention_pattern_cache[group_id] = (pattern, time.time())
         return pattern
