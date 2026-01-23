@@ -1281,6 +1281,15 @@ class Main(star.Star):
             "禁止输出类似 [{'type': 'text', 'text': '...'}] 这样的格式。"
         )
 
+        # 0.5 记忆功能提示（仅在启用时）
+        if self.config.get("enable_user_memory", True):
+            prompts_to_inject.append(
+                "[记忆功能]\n"
+                "你具有记忆用户信息的能力。当用户要求你记住某些信息（如称呼、职业、偏好等）时，"
+                "请使用 lark_save_memory 工具保存。当用户询问你记得什么时，使用 lark_list_memory 工具查询。"
+                "当用户要求忘记信息时，使用 lark_forget_memory 工具删除。"
+            )
+
         # 1. 注入群组信息
         if self.config.get("enable_group_info", True):
             group_info = event.get_extra("lark_group_info")
