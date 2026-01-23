@@ -1527,12 +1527,29 @@ class Main(star.Star):
         else:
             return f"好的，我已经删除了包含「{target}」的记忆（共 {deleted_count} 条）。"
 
-    def _get_mention_pattern(self, group_id: str, members_map: dict[str, str]) -> re.Pattern | None:
-        """获取或创建 @ 提及匹配的正则表达式（带缓存）
+    # 预编译的正则：清理 @ 周围的 Markdown 格式
+    # 匹配 **@xxx**、*@xxx*、__@xxx__、_@xxx_ 等模式，包括中间可能有的换行
+    _MENTION_MARKDOWN_PATTERNS = [
+        re.compile(r"\*\*\s*(@[^\s\*]+)\s*\*\*"),   # **@xxx**
+        re.compile(r"(?<!\*)\*\s*(@[^\s\*]+)\s*\*(?!\*)"),  # *@xxx* (非 **)
+        re.compile(r"__\s*(@[^\s_]+)\s*__"),         # __@xxx__
+        re.compile(r"(?<!_)_\s*(@[^\s_]+)\s*_(?!_)"), # _@xxx_ (非 __)
+        re.compile(r"~~\s*(@[^\s~]+)\s*~~"),         # ~~@xxx~~
+        re.compile(r"`\s*(@[^\s`]+)\s*`"),           # `@xxx`
+    ]
 
-        匹配 @名字，同时捕获前后可能的 Markdown 格式符号（如 **、*、__、_ 等）
-        以便在转换时一并移除这些格式符号。
+    def _clean_mention_markdown(self, text: str) -> str:
+        """清理 @ 提及周围的 Markdown 格式符号
+
+        将 **@名字** 、 *@名字* 、 __@名字__ 等转换为干净的 @名字
         """
+        result = text
+        for pattern in self._MENTION_MARKDOWN_PATTERNS:
+            result = pattern.sub(r"\1", result)
+        return result
+
+    def _get_mention_pattern(self, group_id: str, members_map: dict[str, str]) -> re.Pattern | None:
+        """获取或创建 @ 提及匹配的正则表达式（带缓存）"""
         # 检查缓存
         if group_id in self._mention_pattern_cache:
             pattern, cache_time = self._mention_pattern_cache[group_id]
@@ -1548,15 +1565,8 @@ class Main(star.Star):
             return None
 
         escaped_names = [re.escape(name) for name in sorted_names]
-        # 匹配模式：可选的前置Markdown符号 + 可选空白/换行 + @ + 名字 + 可选空白/换行 + 可选的后置Markdown符号
-        # Markdown 符号：**、*、__、_、~~、`
-        md_pattern = r"(?:\*{1,2}|_{1,2}|~~|`)?"
-        ws_pattern = r"[\s]*"  # 可选的空白字符（包括换行）
-        pattern = re.compile(
-            md_pattern + ws_pattern +
-            r"@(" + "|".join(escaped_names) + r")" +
-            ws_pattern + md_pattern
-        )
+        # 简单匹配 @名字，Markdown 清理在预处理阶段完成
+        pattern = re.compile(r"@(" + "|".join(escaped_names) + r")")
 
         self._mention_pattern_cache[group_id] = (pattern, time.time())
         return pattern
@@ -1580,9 +1590,11 @@ class Main(star.Star):
         for comp in result.chain:
             if isinstance(comp, Plain):
                 cleaned_text = self._clean_content(comp.text)
+                # 清理 @ 周围的 Markdown 格式符号（如 **@名字** -> @名字）
+                cleaned_text = self._clean_mention_markdown(cleaned_text)
                 if cleaned_text != comp.text:
-                    logger.info(
-                        f"[lark_enhance] Cleaned message format: {comp.text[:50]}... -> {cleaned_text[:50]}..."
+                    logger.debug(
+                        f"[lark_enhance] Cleaned message: {comp.text[:50]}... -> {cleaned_text[:50]}..."
                     )
                 cleaned_chain.append(Plain(cleaned_text))
             else:
@@ -1629,8 +1641,15 @@ class Main(star.Star):
                 if not open_id:
                     continue
 
-                if match.start() > last_end:
-                    segments.append(Plain(text[last_end : match.start()]))
+                # 获取 @ 前面的文本
+                before_text = text[last_end : match.start()]
+                # 清理 @ 前面的多余空白和换行（保留一个空格）
+                if before_text:
+                    before_text = before_text.rstrip()
+                    if before_text:
+                        # 如果清理后还有内容，加一个空格分隔
+                        before_text += " "
+                    segments.append(Plain(before_text))
 
                 segments.append(At(qq=open_id, name=name))
                 last_end = match.end()
@@ -1640,7 +1659,12 @@ class Main(star.Star):
                 )
 
             if last_end < len(text):
-                segments.append(Plain(text[last_end:]))
+                # 清理 @ 后面开头的多余空白和换行
+                after_text = text[last_end:]
+                after_text = after_text.lstrip()
+                if after_text:
+                    # 如果有内容，前面加一个空格分隔
+                    segments.append(Plain(" " + after_text))
 
             if segments:
                 new_chain.extend(segments)
