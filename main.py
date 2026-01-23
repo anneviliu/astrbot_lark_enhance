@@ -519,9 +519,8 @@ class Main(star.Star):
         _streaming_config = self.config
         _clean_content_func = self._clean_content
 
-        # 设置流式卡片的 monkey patch
-        if self.config.get("enable_streaming_card", False):
-            self._setup_streaming_patch()
+        # 设置流式卡片的 monkey patch（当 AstrBot 启用流式输出时自动使用卡片展示）
+        self._setup_streaming_patch()
 
     def _atexit_save(self):
         """程序退出时保存历史记录和用户记忆"""
@@ -549,8 +548,8 @@ class Main(star.Star):
     def _setup_streaming_patch(self):
         """设置流式卡片的 monkey patch
 
+        当 AstrBot 框架启用流式输出时，自动使用飞书卡片展示打字机效果。
         注意：Monkey Patch 是一种临时方案，可能在框架更新后失效。
-        如果遇到兼容性问题，请在配置中禁用 enable_streaming_card。
         长期方案是向 AstrBot 框架提交 PR，提供官方的流式输出 Hook。
         """
         global _original_lark_send_streaming
@@ -568,7 +567,6 @@ class Main(star.Star):
                 return
 
             # 检查方法签名是否符合预期（简单检查）
-            import inspect
             sig = inspect.signature(LarkMessageEvent.send_streaming)
             params = list(sig.parameters.keys())
             if "generator" not in params:
@@ -587,10 +585,6 @@ class Main(star.Star):
 
             async def patched_send_streaming(event_self, generator, use_fallback: bool = False):
                 """Monkey-patched send_streaming 方法，使用流式卡片"""
-                # 检查全局配置是否启用
-                if not _streaming_config or not _streaming_config.get("enable_streaming_card", False):
-                    return await _original_lark_send_streaming(event_self, generator, use_fallback)
-
                 # 检查是否是飞书事件
                 if not hasattr(event_self, "bot") or event_self.bot is None:
                     return await _original_lark_send_streaming(event_self, generator, use_fallback)
@@ -1557,11 +1551,8 @@ class Main(star.Star):
         if result is None or not result.chain:
             return
 
-        # 如果启用了流式卡片且是流式完成状态，跳过处理（已由流式卡片处理）
-        if (
-            self.config.get("enable_streaming_card", False)
-            and result.result_content_type == ResultContentType.STREAMING_FINISH
-        ):
+        # 如果是流式完成状态，跳过处理（已由流式卡片处理）
+        if result.result_content_type == ResultContentType.STREAMING_FINISH:
             return
 
         # 第一步：清洗消息内容（处理 LLM 输出的序列化格式）

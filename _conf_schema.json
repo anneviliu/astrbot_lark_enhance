@@ -19,11 +19,6 @@
         "type": "bool",
         "default": true
     },
-    "enable_streaming_card": {
-        "description": "是否启用流式卡片输出（使用飞书消息卡片实现打字机效果，需要 LLM 启用流式输出）",
-        "type": "bool",
-        "default": false
-    },
     "history_inject_count": {
         "description": "本地记录群聊历史消息的数量（0 表示禁用）。启用后，插件将自动记录群组最近的 N 条消息，并在对话时提供给 LLM 作为背景上下文。",
         "type": "int",
