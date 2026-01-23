@@ -21,6 +21,7 @@ from astrbot.core.message.message_event_result import ResultContentType
 
 # Lark SDK imports (顶部导入，避免方法内 import)
 from lark_oapi.api.im.v1 import (
+    DeleteMessageRequest,
     GetChatRequest,
     GetChatMembersRequest,
     GetMessageRequest,
@@ -226,6 +227,33 @@ class LarkStreamingCard:
             logger.error(f"[lark_enhance] Finalize card exception: {e}")
             return False
 
+    async def delete_card(self) -> bool:
+        """删除卡片消息（用于内容为空时清理）"""
+        if not self.card_message_id:
+            return False
+
+        try:
+            request = (
+                DeleteMessageRequest.builder()
+                .message_id(self.card_message_id)
+                .build()
+            )
+
+            response = await self.lark_client.im.v1.message.adelete(request)
+
+            if response.success():
+                logger.debug("[lark_enhance] Deleted empty streaming card")
+                self.card_message_id = None
+                return True
+            else:
+                logger.warning(
+                    f"[lark_enhance] Failed to delete card: {response.code} - {response.msg}"
+                )
+                return False
+        except Exception as e:
+            logger.error(f"[lark_enhance] Delete card exception: {e}")
+            return False
+
 
 class Main(star.Star):
     # 缓存 TTL (秒)
@@ -392,10 +420,14 @@ class Main(star.Star):
                     if _clean_content_func:
                         full_content = _clean_content_func(full_content)
 
-                    # 完成卡片
-                    await streaming_card.finalize_card(full_content)
-
-                    logger.info(f"[lark_enhance] Streaming card completed, length: {len(full_content)}")
+                    # 如果内容为空（例如只使用了表情回复工具），删除卡片
+                    if not full_content.strip():
+                        await streaming_card.delete_card()
+                        logger.info("[lark_enhance] Deleted empty streaming card (no text content)")
+                    else:
+                        # 完成卡片
+                        await streaming_card.finalize_card(full_content)
+                        logger.info(f"[lark_enhance] Streaming card completed, length: {len(full_content)}")
 
                     # 调用父类方法更新统计
                     await BaseEvent.send_streaming(event_self, _empty_generator(), use_fallback)
@@ -404,6 +436,9 @@ class Main(star.Star):
                     logger.error(f"[lark_enhance] Streaming card error: {e}")
                     if full_content:
                         await streaming_card.finalize_card(full_content + "\n\n*（输出中断）*")
+                    else:
+                        # 出错且无内容时也删除卡片
+                        await streaming_card.delete_card()
 
             LarkMessageEvent.send_streaming = patched_send_streaming
             logger.info("[lark_enhance] Streaming card patch applied successfully")
