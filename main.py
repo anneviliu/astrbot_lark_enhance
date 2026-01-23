@@ -4,6 +4,7 @@ import json
 import ast
 import copy
 import datetime
+import os
 from typing import Any
 from collections import deque, defaultdict
 
@@ -15,13 +16,74 @@ from astrbot.core import logger
 class Main(star.Star):
     def __init__(self, context: star.Context, config: dict | None = None):
         super().__init__(context)
-        self.config = config
+        self.config = config or {}
         # open_id -> nickname
         self.user_cache: dict[str, str] = {}
-        
+
         # group_id -> deque of messages
-        # Max history size will be determined by config when used, but we init with a reasonable default
-        self.group_history: dict[str, deque] = defaultdict(lambda: deque(maxlen=50))
+        # 使用配置的 history_inject_count，默认 20
+        self._history_maxlen = self.config.get("history_inject_count", 20) or 20
+        self.group_history: dict[str, deque] = defaultdict(lambda: deque(maxlen=self._history_maxlen))
+
+        # group_id -> group info cache
+        self.group_info_cache: dict[str, dict] = {}
+
+        # 持久化存储路径
+        self._data_dir = os.path.join(os.path.dirname(__file__), "data")
+        self._history_file = os.path.join(self._data_dir, "group_history.json")
+
+        # 加载持久化的历史记录
+        self._load_history()
+
+    def _load_history(self):
+        """从文件加载历史记录"""
+        if not os.path.exists(self._history_file):
+            return
+
+        try:
+            with open(self._history_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            for group_id, items in data.items():
+                self.group_history[group_id] = deque(items, maxlen=self._history_maxlen)
+
+            logger.info(f"[lark_enhance] Loaded history for {len(data)} groups")
+        except Exception as e:
+            logger.error(f"[lark_enhance] Failed to load history: {e}")
+
+    def _save_history(self):
+        """将历史记录保存到文件"""
+        try:
+            os.makedirs(self._data_dir, exist_ok=True)
+
+            data = {
+                group_id: list(items)
+                for group_id, items in self.group_history.items()
+                if items  # 只保存非空的
+            }
+
+            with open(self._history_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+
+            logger.debug(f"[lark_enhance] Saved history for {len(data)} groups")
+        except Exception as e:
+            logger.error(f"[lark_enhance] Failed to save history: {e}")
+
+    def _clear_history_for_session(self, unified_msg_origin: str):
+        """清空指定会话的历史记录
+
+        Args:
+            unified_msg_origin: 会话标识，格式通常为 "platform:type:id"
+        """
+        # unified_msg_origin 格式: "lark:GroupMessage:group_id" 或 "lark:FriendMessage:user_id"
+        # 我们需要提取 group_id
+        parts = unified_msg_origin.split(":")
+        if len(parts) >= 3 and parts[0] == "lark":
+            target_id = parts[2]
+            if target_id in self.group_history:
+                self.group_history[target_id].clear()
+                self._save_history()
+                logger.info(f"[lark_enhance] Cleared history for session: {unified_msg_origin}")
 
     @staticmethod
     def _is_lark_event(event: AstrMessageEvent) -> bool:
@@ -38,7 +100,7 @@ class Main(star.Star):
         
         # 避免查询机器人自己，防止权限错误
         if event and open_id == event.get_self_id():
-            return "GH 助手" # 或者返回机器人的名字
+            return self.config.get("bot_name", "助手")
 
         logger.info(f"[lark_enhance] Querying Lark user info for open_id: {open_id}")
         
@@ -70,6 +132,41 @@ class Main(star.Star):
         except Exception as e:
             logger.error(f"获取飞书用户信息异常: {e}")
             
+        return None
+
+    async def _get_group_info(self, lark_client: Any, chat_id: str) -> dict | None:
+        """获取群组信息（名称和描述）"""
+        if chat_id in self.group_info_cache:
+            return self.group_info_cache[chat_id]
+
+        logger.info(f"[lark_enhance] Querying Lark group info for chat_id: {chat_id}")
+
+        try:
+            from lark_oapi.api.im.v1 import GetChatRequest
+
+            request = GetChatRequest.builder() \
+                .chat_id(chat_id) \
+                .build()
+
+            im = getattr(lark_client, "im", None)
+            if im is None or im.v1 is None or im.v1.chat is None:
+                logger.warning("[lark_enhance] lark_client.im.v1.chat 未初始化，无法获取群组信息")
+                return None
+
+            response = await im.v1.chat.aget(request)
+
+            if response.success() and response.data:
+                group_info = {
+                    "name": getattr(response.data, "name", None),
+                    "description": getattr(response.data, "description", None),
+                }
+                self.group_info_cache[chat_id] = group_info
+                return group_info
+            else:
+                logger.warning(f"获取飞书群组信息失败: {response.code} - {response.msg}")
+        except Exception as e:
+            logger.error(f"获取飞书群组信息异常: {e}")
+
         return None
 
     def _clean_content(self, content_str: str) -> str:
@@ -236,163 +333,176 @@ class Main(star.Star):
         # 1. 增强用户信息 (获取真实昵称)
         sender_id = event.get_sender_id()
         # 默认实现可能是 open_id 截断；这里尽量补全为飞书通讯录里的真实名字
-        if sender_id:
+        if sender_id and self.config.get("enable_real_name", True):
             nickname = await self._get_user_nickname(lark_client, sender_id, event)
             if nickname:
                 logger.info(f"[lark_enhance] Found nickname: {nickname} for {sender_id}")
                 event.message_obj.sender.nickname = nickname
-        
+
         # 增强 Mention 用户信息
-        from astrbot.api.message_components import At
-        for comp in event.message_obj.message:
-            if isinstance(comp, At) and comp.qq: # comp.qq 存储的是 open_id
-                # 如果没有名字，或者名字是 ID (AstrBot 默认行为不确定，但 adapter 那边似乎有 name)
-                # 无论如何，尝试获取真实姓名覆盖，因为 Lark Adapter 里的 name 可能是 mention 下发的，也可能是 open_id
-                real_name = await self._get_user_nickname(lark_client, comp.qq, event)
-                if real_name:
-                    logger.info(f"[lark_enhance] Resolve At: {comp.qq} -> {real_name}")
-                    comp.name = real_name
+        if self.config.get("enable_real_name", True):
+            from astrbot.api.message_components import At
+            for comp in event.message_obj.message:
+                if isinstance(comp, At) and comp.qq: # comp.qq 存储的是 open_id
+                    # 如果没有名字，或者名字是 ID (AstrBot 默认行为不确定，但 adapter 那边似乎有 name)
+                    # 无论如何，尝试获取真实姓名覆盖，因为 Lark Adapter 里的 name 可能是 mention 下发的，也可能是 open_id
+                    real_name = await self._get_user_nickname(lark_client, comp.qq, event)
+                    if real_name:
+                        logger.info(f"[lark_enhance] Resolve At: {comp.qq} -> {real_name}")
+                        comp.name = real_name
 
         # 重新构建 message_str 以包含正确的名字，方便 LLM 理解
         # 注意：这里我们简单地用 [At:Name] 替换原来的文本可能比较困难，因为 message_str 是纯文本
         # AstrBot 的 message_str 默认是不含 At 信息的 (只含 Plain) 或者 adapter 已经处理了
         # 我们这里尝试重新生成 message_str，把 At 组件变成 @Name
-        new_msg_str = ""
-        for comp in event.message_obj.message:
-            if isinstance(comp, At):
-                new_msg_str += f"@{comp.name or comp.qq} "
-            elif hasattr(comp, "text"):
-                new_msg_str += comp.text
-        
-        if new_msg_str:
-             event.message_obj.message_str = new_msg_str
-             event.message_str = new_msg_str # 同步更新外层封装
+        if self.config.get("enable_real_name", True):
+            from astrbot.api.message_components import At
+            new_msg_str = ""
+            for comp in event.message_obj.message:
+                if isinstance(comp, At):
+                    new_msg_str += f"@{comp.name or comp.qq} "
+                elif hasattr(comp, "text"):
+                    new_msg_str += comp.text
+
+            if new_msg_str:
+                event.message_obj.message_str = new_msg_str
+                event.message_str = new_msg_str # 同步更新外层封装
 
         # --- 新增：记录群聊历史 ---
         group_id = event.message_obj.group_id
-        if group_id:
+        history_count = self.config.get("history_inject_count", 20)
+        if group_id and history_count and history_count > 0:
             try:
-                # 获取配置的历史数量
-                history_count = 20
-                if self.config:
-                    history_count = self.config.get("history_inject_count", 20)
-                
-                if history_count > 0:
-                    # 确保 deque 长度符合配置
-                    if self.group_history[group_id].maxlen != history_count:
-                        # 如果配置变更，需要重建 deque (保留旧数据)
-                        old_data = list(self.group_history[group_id])
-                        self.group_history[group_id] = deque(old_data, maxlen=history_count)
-
-                    # 构造历史记录项
-                    time_str = datetime.datetime.now().strftime("%H:%M:%S")
-                    sender_name = event.message_obj.sender.nickname or sender_id or "未知用户"
-                    
-                    # 尝试从 raw_message 中解析更原始内容，或者直接用 message_str
-                    # 这里的 message_str 已经是经过前面 At 增强后的版本
-                    # 关键修改：尝试清洗 message_str，防止脏数据污染
-                    
-                    content_str = self._clean_content(event.message_str)
-
-                    record_item = {
-                        "msg_id": event.message_obj.message_id,
-                        "time": time_str,
-                        "sender": sender_name,
-                        "content": content_str
-                    }
-                    
-                    self.group_history[group_id].append(record_item)
-                    logger.debug(f"[lark_enhance] Recorded message for group {group_id}: {content_str[:20]}...")
-            except Exception as e:
-                logger.error(f"[lark_enhance] Failed to record message history: {e}")
-        # -----------------------
-
-        # 2. 处理引用消息
-        # 检查 raw_message 中是否有 parent_id
-        raw_msg = event.message_obj.raw_message
-        
-        parent_id = getattr(raw_msg, "parent_id", None)
-        if parent_id:
-            logger.info(f"[lark_enhance] Found parent_id: {parent_id}, fetching quoted content...")
-            result = await self._get_message_content(lark_client, parent_id)
-            
-            if result:
-                quoted_content, sender_name = result
-                logger.info(f"[lark_enhance] Fetched quoted content: {quoted_content}, sender: {sender_name}")
-                
-                # 将引用内容注入到 session 或者 message_obj 的 extra 字段中
-                event.set_extra("lark_quoted_content", quoted_content)
-                event.set_extra("lark_quoted_sender", sender_name) # 存储发送者名字
-
-    @filter.after_message_sent()
-    async def on_message_sent(self, event: AstrMessageEvent):
-        """记录机器人自己发送的消息到群聊历史"""
-        if not self._is_lark_event(event):
-            return
-            
-        group_id = event.message_obj.group_id
-        if not group_id:
-            return
-
-        try:
-            # 获取配置的历史数量
-            history_count = 20
-            if self.config:
-                history_count = self.config.get("history_inject_count", 20)
-            
-            if history_count > 0:
-                # 确保 deque 长度符合配置
+                # 确保 deque 长度符合配置（配置可能运行时变更）
                 if self.group_history[group_id].maxlen != history_count:
                     # 如果配置变更，需要重建 deque (保留旧数据)
                     old_data = list(self.group_history[group_id])
                     self.group_history[group_id] = deque(old_data, maxlen=history_count)
+                    self._history_maxlen = history_count  # 同步更新默认值
 
                 # 构造历史记录项
                 time_str = datetime.datetime.now().strftime("%H:%M:%S")
-                # 机器人自己发送的消息，sender 为 "GH 助手"
-                sender_name = "GH 助手"
-                
-                # event.message_str 在发送后通常是发送的内容
-                # 警告：AstrMessageEvent 在发送后，message_str 可能仍然是用户发送的内容，而不是 Bot 回复的内容。
-                # 我们需要优先从 result 中获取。
-                
-                content_str = ""
-                result = event.get_result()
-                if result:
-                    # 尝试从 result 中提取文本
-                    from astrbot.api.message_components import Plain
-                    chain = result.chain
-                    if chain:
-                        texts = [c.text for c in chain if isinstance(c, Plain)]
-                        content_str = "".join(texts)
-                
-                if not content_str:
-                    # 如果 result 为空，再尝试 message_str，但要小心
-                    # 为了避免记录用户的话，我们加上日志调试
-                    logger.debug(f"[lark_enhance] Result chain empty. event.message_str: {event.message_str}")
-                    # 只有当 message_str 与 event.message_obj.message_str (用户原始输入) 不同时才使用？
-                    # 或者干脆如果不从 result 拿到就不记录了，宁缺毋滥。
-                    return 
-                
-                # 清洗内容
-                content_str = self._clean_content(content_str)
+                sender_name = event.message_obj.sender.nickname or sender_id or "未知用户"
 
-                if not content_str:
-                    return
+                # 尝试从 raw_message 中解析更原始内容，或者直接用 message_str
+                # 这里的 message_str 已经是经过前面 At 增强后的版本
+                # 关键修改：尝试清洗 message_str，防止脏数据污染
 
-                # 使用当前时间戳作为 msg_id (因为发送后不一定能马上拿到 msg_id，且主要是为了去重和排序，用时间戳近似也可以)
-                # 或者我们可以留空 msg_id，但在读取时需要处理
-                msg_id = f"sent_{int(datetime.datetime.now().timestamp())}"
-                
+                content_str = self._clean_content(event.message_str)
+
                 record_item = {
-                    "msg_id": msg_id,
+                    "msg_id": event.message_obj.message_id,
                     "time": time_str,
                     "sender": sender_name,
                     "content": content_str
                 }
-                
+
                 self.group_history[group_id].append(record_item)
-                logger.debug(f"[lark_enhance] Recorded SELF message for group {group_id}: {content_str[:20]}...")
+                self._save_history()  # 持久化
+                logger.debug(f"[lark_enhance] Recorded message for group {group_id}: {content_str[:20]}...")
+            except Exception as e:
+                logger.error(f"[lark_enhance] Failed to record message history: {e}")
+
+        # --- 获取群组信息 ---
+        if group_id and self.config.get("enable_group_info", True):
+            group_info = await self._get_group_info(lark_client, group_id)
+            if group_info:
+                event.set_extra("lark_group_info", group_info)
+        # -----------------------
+
+        # 2. 处理引用消息
+        if self.config.get("enable_quoted_content", True):
+            # 检查 raw_message 中是否有 parent_id
+            raw_msg = event.message_obj.raw_message
+
+            parent_id = getattr(raw_msg, "parent_id", None)
+            if parent_id:
+                logger.info(f"[lark_enhance] Found parent_id: {parent_id}, fetching quoted content...")
+                result = await self._get_message_content(lark_client, parent_id)
+
+                if result:
+                    quoted_content, sender_name = result
+                    logger.info(f"[lark_enhance] Fetched quoted content: {quoted_content}, sender: {sender_name}")
+
+                    # 将引用内容注入到 session 或者 message_obj 的 extra 字段中
+                    event.set_extra("lark_quoted_content", quoted_content)
+                    event.set_extra("lark_quoted_sender", sender_name) # 存储发送者名字
+
+    @filter.after_message_sent()
+    async def on_message_sent(self, event: AstrMessageEvent):
+        """记录机器人自己发送的消息到群聊历史，并处理 /reset 命令"""
+        if not self._is_lark_event(event):
+            return
+
+        # 优先检查是否触发了 /reset 命令，清空对应会话的本地历史
+        if event.get_extra("_clean_ltm_session", False):
+            unified_msg_origin = event.unified_msg_origin
+            if unified_msg_origin:
+                self._clear_history_for_session(unified_msg_origin)
+
+        # 记录机器人自己发送的消息
+        group_id = event.message_obj.group_id
+        if not group_id:
+            return
+
+        history_count = self.config.get("history_inject_count", 20)
+        if not history_count or history_count <= 0:
+            return
+
+        try:
+            # 确保 deque 长度符合配置
+            if self.group_history[group_id].maxlen != history_count:
+                # 如果配置变更，需要重建 deque (保留旧数据)
+                old_data = list(self.group_history[group_id])
+                self.group_history[group_id] = deque(old_data, maxlen=history_count)
+
+            # 构造历史记录项
+            time_str = datetime.datetime.now().strftime("%H:%M:%S")
+            # 机器人自己发送的消息，使用配置的 bot_name
+            sender_name = self.config.get("bot_name", "助手")
+
+            # event.message_str 在发送后通常是发送的内容
+            # 警告：AstrMessageEvent 在发送后，message_str 可能仍然是用户发送的内容，而不是 Bot 回复的内容。
+            # 我们需要优先从 result 中获取。
+
+            content_str = ""
+            result = event.get_result()
+            if result:
+                # 尝试从 result 中提取文本
+                from astrbot.api.message_components import Plain
+                chain = result.chain
+                if chain:
+                    texts = [c.text for c in chain if isinstance(c, Plain)]
+                    content_str = "".join(texts)
+
+            if not content_str:
+                # 如果 result 为空，再尝试 message_str，但要小心
+                # 为了避免记录用户的话，我们加上日志调试
+                logger.debug(f"[lark_enhance] Result chain empty. event.message_str: {event.message_str}")
+                # 只有当 message_str 与 event.message_obj.message_str (用户原始输入) 不同时才使用？
+                # 或者干脆如果不从 result 拿到就不记录了，宁缺毋滥。
+                return
+
+            # 清洗内容
+            content_str = self._clean_content(content_str)
+
+            if not content_str:
+                return
+
+            # 使用当前时间戳作为 msg_id (因为发送后不一定能马上拿到 msg_id，且主要是为了去重和排序，用时间戳近似也可以)
+            # 或者我们可以留空 msg_id，但在读取时需要处理
+            msg_id = f"sent_{int(datetime.datetime.now().timestamp())}"
+
+            record_item = {
+                "msg_id": msg_id,
+                "time": time_str,
+                "sender": sender_name,
+                "content": content_str
+            }
+
+            self.group_history[group_id].append(record_item)
+            self._save_history()  # 持久化
+            logger.debug(f"[lark_enhance] Recorded SELF message for group {group_id}: {content_str[:20]}...")
         except Exception as e:
             logger.error(f"[lark_enhance] Failed to record self message history: {e}")
 
@@ -404,9 +514,11 @@ class Main(star.Star):
             return
 
         # 清理 Context 中的 tool_calls，以避免 Gemini thought_signature 错误
-        if req.contexts:
+        if self.config.get("enable_context_cleaner", True) and req.contexts:
             # 使用 deepcopy 防止修改原始 history 对象
             new_contexts = copy.deepcopy(req.contexts)
+            cleaned_contexts = []
+
             for ctx in new_contexts:
                 if ctx.get("role") == "assistant" and "tool_calls" in ctx:
                     logger.debug(f"[lark_enhance] Cleaning tool_calls from context: {ctx.get('tool_calls')}")
@@ -414,40 +526,56 @@ class Main(star.Star):
                     # 如果 content 为空，给一个占位符，防止 API 报错
                     if not ctx.get("content"):
                         ctx["content"] = "（已执行工具调用）"
-                
-                # 同时也需要清理对应的 tool 消息，否则会有 orphan tool result
-                if ctx.get("role") == "tool":
+                    cleaned_contexts.append(ctx)
+
+                elif ctx.get("role") == "tool":
+                    # 将 tool 消息转换为 user 消息，避免连续 assistant 问题
                     logger.debug(f"[lark_enhance] Cleaning tool message from context: {ctx}")
-                    ctx["role"] = "assistant" # 改为 assistant
-                    
                     content = ctx.get("content", "")
                     if "The tool has no return value" in content:
-                        ctx["content"] = "（已执行动作）"
+                        tool_content = "（已执行动作）"
                     else:
-                        ctx["content"] = f"（工具执行结果：{content}）"
-                    
-                    ctx.pop("tool_call_id", None) # 移除关联 ID
-            
+                        tool_content = f"（工具执行结果：{content}）"
+
+                    # 如果上一条是 user 消息，合并到上一条；否则创建新的 user 消息
+                    if cleaned_contexts and cleaned_contexts[-1].get("role") == "user":
+                        cleaned_contexts[-1]["content"] = cleaned_contexts[-1].get("content", "") + "\n" + tool_content
+                    else:
+                        cleaned_contexts.append({"role": "user", "content": tool_content})
+                else:
+                    cleaned_contexts.append(ctx)
+
             # 更新 req.contexts
-            req.contexts = new_contexts
+            req.contexts = cleaned_contexts
 
         prompts_to_inject = []
 
-        # 1. 注入引用消息
-        quoted_content = event.get_extra("lark_quoted_content")
-        quoted_sender = event.get_extra("lark_quoted_sender")
+        # 1. 注入群组信息
+        if self.config.get("enable_group_info", True):
+            group_info = event.get_extra("lark_group_info")
+            if group_info:
+                group_name = group_info.get("name")
+                group_desc = group_info.get("description")
+                if group_name:
+                    info_parts = [f"群名称：{group_name}"]
+                    if group_desc:
+                        info_parts.append(f"群描述：{group_desc}")
+                    prompts_to_inject.append(f"[当前群组信息]\n" + "\n".join(info_parts))
 
-        if quoted_content:
-            logger.info(f"[lark_enhance] Injecting quoted content into LLM prompt.")
-            if quoted_sender:
-                prompts_to_inject.append(f"「{quoted_sender}」在回复的消息中说道：\n{quoted_content}\n")
-            else:
-                prompts_to_inject.append(f"[引用消息]\n{quoted_content}\n")
+        # 2. 注入引用消息
+        if self.config.get("enable_quoted_content", True):
+            quoted_content = event.get_extra("lark_quoted_content")
+            quoted_sender = event.get_extra("lark_quoted_sender")
+
+            if quoted_content:
+                logger.info(f"[lark_enhance] Injecting quoted content into LLM prompt.")
+                if quoted_sender:
+                    prompts_to_inject.append(f"「{quoted_sender}」在回复的消息中说道：\n{quoted_content}\n")
+                else:
+                    prompts_to_inject.append(f"[引用消息]\n{quoted_content}\n")
         
-        # 2. 注入群聊历史 (修改：从本地缓存读取)
-        history_count = 0
-        if self.config:
-            history_count = self.config.get("history_inject_count", 0)
+        # 3. 注入群聊历史 (修改：从本地缓存读取)
+        history_count = self.config.get("history_inject_count", 0)
             
         group_id = event.message_obj.group_id
         if history_count > 0 and group_id and group_id in self.group_history:

@@ -28,5 +28,10 @@
         "description": "本地记录群聊历史消息的数量（0 表示禁用）。启用后，插件将自动记录群组最近的 N 条消息，并在对话时提供给 LLM 作为背景上下文。",
         "type": "int",
         "default": 20
+    },
+    "bot_name": {
+        "description": "机器人在群聊历史记录中显示的名称",
+        "type": "str",
+        "default": "助手"
     }
 }
