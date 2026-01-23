@@ -38,5 +38,20 @@
         "description": "是否启用 @ 转换功能（将 LLM 回复中的 @名字 自动转换为飞书 @ 提及）",
         "type": "bool",
         "default": true
+    },
+    "enable_user_memory": {
+        "description": "是否启用用户记忆功能（记住用户在群内的偏好、信息和指令）",
+        "type": "bool",
+        "default": true
+    },
+    "memory_max_per_user": {
+        "description": "每个用户在每个群内最多保存的记忆条数",
+        "type": "int",
+        "default": 20
+    },
+    "memory_inject_limit": {
+        "description": "每次请求 LLM 时最多注入的记忆条数",
+        "type": "int",
+        "default": 10
     }
 }
