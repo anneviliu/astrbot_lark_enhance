@@ -970,20 +970,20 @@ class Main(star.Star):
     async def lark_emoji_reply(self, event: AstrMessageEvent, emoji: str):
         """飞书表情回复工具。仅在非常有必要对用户的消息表达强烈情感（如点赞、开心、收到）且无需文字回复时使用。请勿滥用此工具，不要对每条消息都进行表情回复。
 
-        常用表情代码值：
-        THUMBSUP(点赞), THUMBSDOWN(踩), FIGHTON(加油), THANKS(感谢), HEART(比心), OK(OK), YES(Yes/V手势), NO(NO/X手势)
-        CLAP(鼓掌), LAUGH(大笑), WAH(哇), CRY(流泪), GLANCE(狗头/斜眼笑), DULL(呆无辜), KISS(飞吻), ROSE(玫瑰)
-        DONE(完成), CHECK(勾), CROSS(叉), WAVE(再见), BLUSH(脸红), SOB(大哭), JOY(破涕为笑)
-        BEER(啤酒), CAKE(蛋糕), JIAYI(+1), HIGHFIVE(击掌), EYES(围观), AWESOME(666), FIRE(给力/火), MUSCLE(强/肌肉)
-        SHAKE(握手), SALUTE(敬礼), WINK(眨眼), SHHH(嘘), PROUD(得意), HEARTBROKEN(心碎), POOP(便便), GIFT(礼物)
-        CUCUMBER(吃瓜), SLAP(打脸), SPIT(吐血), ANGRY(生气), WHOA(震惊), SWEAT(汗), EATING(吃饭), SLEEP(睡觉)
-        SMART(机智), MURMUR(暗中观察), GET(Get!), LUCK(祝好/锦鲤), HUG(拥抱)
-        SUN(太阳), MOON(月亮), RAINBOW(彩虹), STAR(星星), FLOWER(花), SNOWMAN(雪人), UNICORN(独角兽)
-        SKULL(骷髅), GHOST(幽灵), ALIEN(外星人), ROBOT(机器人)
-        MONKEY(猴子), DOG(狗), CAT(猫), PIG(猪), CHICKEN(鸡), BEAR(熊), PANDA(熊猫), RABBIT(兔子), KOALA(考拉)
-        TIGER(老虎), LION(狮子), HORSE(马), COW(牛), DRAGON(龙), WHALE(鲸鱼), DOLPHIN(海豚), FISH(鱼), OCTOPUS(章鱼)
-        SHARK(鲨鱼), BUTTERFLY(蝴蝶), BEE(蜜蜂), SPIDER(蜘蛛), ANT(蚂蚁), SNAIL(蜗牛), LADYBEETLE(瓢虫)
-        SCORPION(蝎子), MOSQUITO(蚊子), FLY(苍蝇), WORM(蠕虫), BUG(虫子)
+        常用表情代码（基于飞书官方 API）：
+        THUMBSUP(点赞), THUMBSDOWN(踩), JIAYI(+1), OK, YES, NO, DONE(完成), CHECKMARK(勾), CROSSMARK(叉)
+        SMILE(微笑), LAUGH(大笑), JOYFUL(开心), BLUSH(脸红), WINK(眨眼), SHY(害羞), SMIRK(坏笑), PROUD(得意)
+        THANKS(感谢), HEART(比心), KISS(飞吻), LOVE(爱心), HUG(拥抱), ROSE(玫瑰), FINGERHEARD(比心手势)
+        APPLAUSE(鼓掌), CLAP(鼓掌), HIGHFIVE(击掌), FISTBUMP(碰拳), SHAKE(握手), SALUTE(敬礼), WAVE(再见)
+        AWESOME(666), MUSCLE(强), FIRE(火), TROPHY(奖杯), LGTM(LGTM), GET(收到), ONIT(搞定), PRAISE(赞)
+        CRY(流泪), SOB(大哭), TEARS(流泪), HEARTBROKEN(心碎), WRONGED(委屈), COMFORT(安慰)
+        ANGRY(生气), SCOWL(皱眉), FROWN(不高兴), SPEECHLESS(无语), SWEAT(汗), FACEPALM(捂脸)
+        WOW(哇), SHOCKED(震惊), PETRIFIED(石化), TERROR(恐惧), DIZZY(晕), SKULL(骷髅)
+        GLANCE(斜眼), DULL(呆), SMART(机智), THINKING(思考), SHHH(嘘), SILENT(沉默)
+        BEER(啤酒), COFFEE(咖啡), CAKE(蛋糕), GIFT(礼物), REDPACKET(红包), PARTY(派对)
+        CUCUMBER(吃瓜), SLAP(打脸), POOP(便便), SPITBLOOD(吐血), RAINBOWPUKE(彩虹吐)
+        SLEEP(睡觉), YAWN(打哈欠), EATING(吃饭), SICK(生病), DROWSY(困)
+        BEAR(熊), HUSKY(哈士奇), BULL(牛), CALF(小牛), SNOWMAN(雪人), LUCK(锦鲤)
 
         Args:
             emoji(string): 表情代码。请使用上述列表中的全大写英文代码。
