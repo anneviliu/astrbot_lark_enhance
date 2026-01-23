@@ -1,6 +1,6 @@
 name: lark_enhance
-desc: 增强 AstrBot 在飞书场景下的表现，支持卡片消息等高级特性
-author: AstrBot_User
+desc: 增强 AstrBot 在飞书场景下的表现，上下文感知增强（名字、群名、聊天记录、引用回复），流式输出，@群成员等
+author: anneviliu
 version: 0.1.0
-url: https://github.com/AstrBotDevs/AstrBot
+url: https://github.com/anneviliu/astrbot_lark_enhance
 display_name: 飞书增强插件
