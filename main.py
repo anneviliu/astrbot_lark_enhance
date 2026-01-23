@@ -1069,6 +1069,13 @@ class Main(star.Star):
 
         prompts_to_inject = []
 
+        # 0. 输出格式约束（防止 LLM 输出序列化格式）
+        prompts_to_inject.append(
+            "[输出格式要求]\n"
+            "请直接用自然语言回复，不要输出任何序列化格式如 JSON、Python 列表/字典等。"
+            "禁止输出类似 [{'type': 'text', 'text': '...'}] 这样的格式。"
+        )
+
         # 1. 注入群组信息
         if self.config.get("enable_group_info", True):
             group_info = event.get_extra("lark_group_info")
