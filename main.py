@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import copy
 import datetime
+import inspect
 import json
 import re
 import time
@@ -18,6 +19,18 @@ from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import StarTools
 from astrbot.core.message.message_event_result import ResultContentType
 
+# Lark SDK imports (顶部导入，避免方法内 import)
+from lark_oapi.api.im.v1 import (
+    GetChatRequest,
+    GetChatMembersRequest,
+    GetMessageRequest,
+    PatchMessageRequest,
+    PatchMessageRequestBody,
+    ReplyMessageRequest,
+    ReplyMessageRequestBody,
+)
+from lark_oapi.api.contact.v3 import GetUserRequest
+
 # 保存原始的 send_streaming 方法
 _original_lark_send_streaming = None
 # 全局配置引用（用于 monkey patch）
@@ -30,6 +43,56 @@ async def _empty_generator():
     """空的异步生成器，用于调用父类方法"""
     return
     yield  # 让它成为异步生成器
+
+
+class LarkCardBuilder:
+    """飞书消息卡片构建器 - 提供优雅的链式 API 构建卡片"""
+
+    def __init__(self):
+        self._elements: list[dict] = []
+        self._config = {"wide_screen_mode": True}
+
+    def markdown(self, content: str) -> "LarkCardBuilder":
+        """添加 Markdown 元素"""
+        self._elements.append({"tag": "markdown", "content": content})
+        return self
+
+    def divider(self) -> "LarkCardBuilder":
+        """添加分割线"""
+        self._elements.append({"tag": "hr"})
+        return self
+
+    def loading_indicator(self, text: str = "正在输入...") -> "LarkCardBuilder":
+        """添加加载指示器"""
+        self._elements.append({"tag": "markdown", "content": f"◉ *{text}*"})
+        return self
+
+    def thinking_indicator(self) -> "LarkCardBuilder":
+        """添加思考中指示器"""
+        return self.loading_indicator("思考中...")
+
+    def build(self) -> str:
+        """构建并返回卡片 JSON 字符串"""
+        card = {
+            "schema": "2.0",
+            "config": self._config,
+            "body": {
+                "elements": self._elements if self._elements else [
+                    {"tag": "markdown", "content": "◉ *思考中...*"}
+                ],
+            },
+        }
+        return json.dumps(card, ensure_ascii=False)
+
+    @classmethod
+    def streaming_card(cls, text: str, is_finished: bool = False) -> str:
+        """快速创建流式输出卡片"""
+        builder = cls()
+        if text:
+            builder.markdown(text)
+        if not is_finished:
+            builder.loading_indicator()
+        return builder.build()
 
 
 class LarkStreamingCard:
@@ -49,46 +112,10 @@ class LarkStreamingCard:
         self._last_update_time: float = 0
         self._last_update_length: int = 0
 
-    def _build_card_content(self, text: str, is_finished: bool = False) -> str:
-        """构建卡片 JSON 内容"""
-        # 使用 Markdown 元素显示内容
-        elements = []
-
-        if text:
-            elements.append({
-                "tag": "markdown",
-                "content": text,
-            })
-
-        if not is_finished:
-            # 添加加载指示器
-            elements.append({
-                "tag": "markdown",
-                "content": "◉ *正在输入...*",
-            })
-
-        card = {
-            "schema": "2.0",
-            "config": {
-                "wide_screen_mode": True,
-            },
-            "body": {
-                "elements": elements if elements else [
-                    {"tag": "markdown", "content": "◉ *思考中...*"}
-                ],
-            },
-        }
-        return json.dumps(card, ensure_ascii=False)
-
     async def create_initial_card(self) -> bool:
         """创建初始卡片消息"""
         try:
-            from lark_oapi.api.im.v1 import (
-                ReplyMessageRequest,
-                ReplyMessageRequestBody,
-            )
-
-            content = self._build_card_content("", is_finished=False)
+            content = LarkCardBuilder.streaming_card("", is_finished=False)
 
             request = (
                 ReplyMessageRequest.builder()
@@ -142,9 +169,7 @@ class LarkStreamingCard:
                 return True  # 跳过本次更新
 
         try:
-            from lark_oapi.api.im.v1 import PatchMessageRequest, PatchMessageRequestBody
-
-            content = self._build_card_content(text, is_finished=False)
+            content = LarkCardBuilder.streaming_card(text, is_finished=False)
 
             request = (
                 PatchMessageRequest.builder()
@@ -176,9 +201,7 @@ class LarkStreamingCard:
             return False
 
         try:
-            from lark_oapi.api.im.v1 import PatchMessageRequest, PatchMessageRequestBody
-
-            content = self._build_card_content(text, is_finished=True)
+            content = LarkCardBuilder.streaming_card(text, is_finished=True)
 
             request = (
                 PatchMessageRequest.builder()
@@ -285,11 +308,36 @@ class Main(star.Star):
             logger.error(f"[lark_enhance] Failed to load history: {e}")
 
     def _setup_streaming_patch(self):
-        """设置流式卡片的 monkey patch"""
+        """设置流式卡片的 monkey patch
+
+        注意：Monkey Patch 是一种临时方案，可能在框架更新后失效。
+        如果遇到兼容性问题，请在配置中禁用 enable_streaming_card。
+        长期方案是向 AstrBot 框架提交 PR，提供官方的流式输出 Hook。
+        """
         global _original_lark_send_streaming
 
         try:
             from astrbot.core.platform.sources.lark.lark_event import LarkMessageEvent
+            from astrbot.core.platform.astr_message_event import AstrMessageEvent as BaseEvent
+
+            # 验证 LarkMessageEvent 具有预期的 send_streaming 方法
+            if not hasattr(LarkMessageEvent, "send_streaming"):
+                logger.warning(
+                    "[lark_enhance] LarkMessageEvent 没有 send_streaming 方法，"
+                    "可能框架版本不兼容，跳过流式卡片补丁"
+                )
+                return
+
+            # 检查方法签名是否符合预期（简单检查）
+            import inspect
+            sig = inspect.signature(LarkMessageEvent.send_streaming)
+            params = list(sig.parameters.keys())
+            if "generator" not in params:
+                logger.warning(
+                    "[lark_enhance] send_streaming 方法签名不符合预期，"
+                    "可能框架版本不兼容，跳过流式卡片补丁"
+                )
+                return
 
             # 避免重复 patch
             if _original_lark_send_streaming is not None:
@@ -350,7 +398,6 @@ class Main(star.Star):
                     logger.info(f"[lark_enhance] Streaming card completed, length: {len(full_content)}")
 
                     # 调用父类方法更新统计
-                    from astrbot.core.platform.astr_message_event import AstrMessageEvent as BaseEvent
                     await BaseEvent.send_streaming(event_self, _empty_generator(), use_fallback)
 
                 except Exception as e:
@@ -471,8 +518,6 @@ class Main(star.Star):
         logger.debug(f"[lark_enhance] Querying Lark user info for open_id: {open_id}")
 
         try:
-            from lark_oapi.api.contact.v3 import GetUserRequest
-
             request = (
                 GetUserRequest.builder()
                 .user_id(open_id)
@@ -518,8 +563,6 @@ class Main(star.Star):
         logger.debug(f"[lark_enhance] Querying Lark group info for chat_id: {chat_id}")
 
         try:
-            from lark_oapi.api.im.v1 import GetChatRequest
-
             request = GetChatRequest.builder().chat_id(chat_id).build()
 
             im = getattr(lark_client, "im", None)
@@ -563,8 +606,6 @@ class Main(star.Star):
         members_map: dict[str, str] = {}
 
         try:
-            from lark_oapi.api.im.v1 import GetChatMembersRequest
-
             im = getattr(lark_client, "im", None)
             if im is None or im.v1 is None or im.v1.chat_members is None:
                 logger.warning(
@@ -624,7 +665,11 @@ class Main(star.Star):
         return members_map
 
     def _clean_content(self, content_str: str) -> str:
-        """清洗消息内容，尝试从 JSON/Python-repr 中提取纯文本"""
+        """清洗消息内容，仅处理 AstrBot 序列化的消息组件格式。
+
+        只清洗形如 [{'type': 'text', 'text': '...'}] 的 AstrBot 内部格式，
+        不会影响用户讨论的普通代码或 JSON 数据。
+        """
         if not content_str:
             return content_str
 
@@ -634,21 +679,47 @@ class Main(star.Star):
         if len(content_str) > self._CLEAN_CONTENT_MAX_LEN:
             return content_str
 
-        # 快速检查：如果不是以 [ 或 { 开头，大概率是普通文本
-        if not (content_str.startswith("[") or content_str.startswith("{")):
+        # 快速检查：如果不是以 [ 开头，肯定不是消息组件格式
+        if not content_str.startswith("["):
             return content_str
 
         # 尝试解析为 JSON
         try:
             data = json.loads(content_str)
-            result = self._extract_text_from_data(data, depth=0)
-            return result if result else content_str
         except json.JSONDecodeError:
-            pass
+            return content_str
 
-        # 不再使用 ast.literal_eval，避免安全风险
-        # 如果 JSON 解析失败，直接返回原内容
-        return content_str
+        # 严格检测：只处理 AstrBot 消息组件格式
+        # 格式必须是：列表，且列表中的字典包含 'type' 键
+        if not self._is_astrbot_message_format(data):
+            return content_str
+
+        result = self._extract_text_from_data(data, depth=0)
+        return result if result else content_str
+
+    def _is_astrbot_message_format(self, data: Any) -> bool:
+        """检测数据是否为 AstrBot 消息组件格式。
+
+        AstrBot 格式特征：
+        - 是一个列表
+        - 列表中至少有一个字典包含 'type' 键
+        - type 值为 'text', 'image', 'at' 等消息类型
+        """
+        if not isinstance(data, list):
+            return False
+
+        if not data:
+            return False
+
+        # 检查列表中是否有符合消息组件格式的字典
+        valid_types = {'text', 'image', 'at', 'plain', 'face', 'record', 'video', 'file'}
+        for item in data:
+            if isinstance(item, dict) and 'type' in item:
+                type_value = item.get('type', '').lower()
+                if type_value in valid_types:
+                    return True
+
+        return False
 
     def _extract_text_from_data(self, data: Any, depth: int = 0) -> str:
         """递归从 list/dict 中提取 text 字段"""
@@ -689,8 +760,6 @@ class Main(star.Star):
     ) -> tuple[str, str | None] | None:
         """获取消息内容和发送者信息"""
         try:
-            from lark_oapi.api.im.v1 import GetMessageRequest
-
             request = GetMessageRequest.builder().message_id(message_id).build()
 
             im = getattr(lark_client, "im", None)
