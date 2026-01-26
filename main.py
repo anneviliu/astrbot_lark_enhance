@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from astrbot.api import logger, star
-from astrbot.api.event import AstrMessageEvent, MessageChain, filter
+from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import At, Plain
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import StarTools
@@ -21,6 +21,8 @@ from astrbot.core.message.message_event_result import ResultContentType
 
 # Lark SDK imports (顶部导入，避免方法内 import)
 from lark_oapi.api.im.v1 import (
+    CreateMessageReactionRequest,
+    CreateMessageReactionRequestBody,
     DeleteMessageRequest,
     GetChatRequest,
     GetChatMembersRequest,
@@ -30,6 +32,7 @@ from lark_oapi.api.im.v1 import (
     ReplyMessageRequest,
     ReplyMessageRequestBody,
 )
+from lark_oapi.api.im.v1.model import Emoji
 from lark_oapi.api.contact.v3 import GetUserRequest
 
 # 保存原始的 send_streaming 方法
@@ -260,16 +263,14 @@ class UserMemoryStore:
 
     # 记忆类型优先级（用于排序）
     TYPE_PRIORITY = {"instruction": 0, "preference": 1, "fact": 2}
+    # 缓存最大群数量
+    _CACHE_MAX_SIZE = 100
 
     def __init__(self, data_dir: Path):
         self._data_dir = data_dir / "user_memory"
         self._data_dir.mkdir(parents=True, exist_ok=True)
-        # 内存缓存: group_id -> group_data
-        self._cache: dict[str, dict] = {}
-        # 保存防抖
-        self._pending_saves: set[str] = set()
-        self._last_save_time: dict[str, float] = {}
-        self._save_debounce = 5  # 秒
+        # 内存缓存: group_id -> group_data（使用 OrderedDict 实现 LRU）
+        self._cache: OrderedDict[str, dict] = OrderedDict()
 
     def _get_file_path(self, group_id: str) -> Path:
         """获取群记忆文件路径"""
@@ -280,6 +281,8 @@ class UserMemoryStore:
     def _load_group_data(self, group_id: str) -> dict:
         """加载群记忆数据"""
         if group_id in self._cache:
+            # 移动到末尾（LRU）
+            self._cache.move_to_end(group_id)
             return self._cache[group_id]
 
         file_path = self._get_file_path(group_id)
@@ -287,46 +290,44 @@ class UserMemoryStore:
             try:
                 with open(file_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    self._cache[group_id] = data
+                    self._set_cache(group_id, data)
                     return data
             except Exception as e:
                 logger.error(f"[lark_enhance] Failed to load memory for group {group_id}: {e}")
 
         # 初始化空数据
         data = {"group_id": group_id, "users": {}, "updated_at": time.time()}
-        self._cache[group_id] = data
+        self._set_cache(group_id, data)
         return data
 
-    def _save_group_data(self, group_id: str, force: bool = False):
-        """保存群记忆数据（带防抖）"""
-        now = time.time()
-        last_save = self._last_save_time.get(group_id, 0)
+    def _set_cache(self, group_id: str, data: dict):
+        """设置缓存（带容量限制）"""
+        # 如果已存在，先删除
+        if group_id in self._cache:
+            del self._cache[group_id]
 
-        if not force and now - last_save < self._save_debounce:
-            self._pending_saves.add(group_id)
-            return
+        # 检查容量，移除最老的条目
+        while len(self._cache) >= self._CACHE_MAX_SIZE:
+            self._cache.popitem(last=False)
 
+        self._cache[group_id] = data
+
+    def _save_group_data(self, group_id: str):
+        """保存群记忆数据（立即写入）"""
         if group_id not in self._cache:
             return
 
         try:
             data = self._cache[group_id]
-            data["updated_at"] = now
+            data["updated_at"] = time.time()
             file_path = self._get_file_path(group_id)
 
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
 
-            self._last_save_time[group_id] = now
-            self._pending_saves.discard(group_id)
             logger.debug(f"[lark_enhance] Saved memory for group {group_id}")
         except Exception as e:
             logger.error(f"[lark_enhance] Failed to save memory for group {group_id}: {e}")
-
-    def flush_all(self):
-        """强制保存所有待保存的数据"""
-        for group_id in list(self._pending_saves):
-            self._save_group_data(group_id, force=True)
 
     def add_memory(
         self,
@@ -437,7 +438,7 @@ class UserMemoryStore:
             deleted_count = original_count - len(user_data["memories"])
 
         if deleted_count > 0:
-            self._save_group_data(group_id, force=True)
+            self._save_group_data(group_id)
             logger.info(f"[lark_enhance] Deleted {deleted_count} memories for user {user_id}")
 
         return deleted_count
@@ -523,11 +524,9 @@ class Main(star.Star):
         self._setup_streaming_patch()
 
     def _atexit_save(self):
-        """程序退出时保存历史记录和用户记忆"""
+        """程序退出时保存历史记录"""
         if self._pending_save or self.group_history:
             self._save_history(force=True)
-        # 保存用户记忆
-        self._memory_store.flush_all()
 
     def _load_history(self):
         """从文件加载历史记录"""
@@ -1359,12 +1358,12 @@ class Main(star.Star):
             )
             req.system_prompt = (req.system_prompt or "") + "\n\n" + final_inject
 
-        # 调试日志
-        logger.debug("=" * 20 + " [lark_enhance] LLM Request Payload " + "=" * 20)
-        logger.debug(f"System Prompt: {req.system_prompt}")
-        logger.debug(f"Contexts (History): {req.contexts}")
-        logger.debug(f"Current Prompt: {req.prompt}")
-        logger.debug("=" * 60)
+        # 打印输入给 LLM 的原始内容
+        logger.info("=" * 20 + " [lark_enhance] LLM Request Payload " + "=" * 20)
+        logger.info(f"System Prompt:\n{req.system_prompt}")
+        logger.info(f"Contexts (History):\n{json.dumps(req.contexts, ensure_ascii=False, indent=2)}")
+        logger.info(f"Current Prompt:\n{req.prompt}")
+        logger.info("=" * 60)
 
     @filter.llm_tool(name="lark_emoji_reply")
     async def lark_emoji_reply(self, event: AstrMessageEvent, emoji: str):
@@ -1398,16 +1397,48 @@ class Main(star.Star):
             )
             return "该消息已添加过表情回复，每条消息只能添加一个表情。"
 
+        lark_client = self._get_lark_client(event)
+        if lark_client is None:
+            logger.warning("[lark_enhance] lark_client is None, cannot add emoji reaction")
+            return "无法获取飞书客户端，添加表情失败。"
+
         try:
-            await event.react(emoji)
-            self._reacted_messages[message_id] = True
+            # 使用 Lark SDK 直接调用 API 添加表情回复
+            request = (
+                CreateMessageReactionRequest.builder()
+                .message_id(message_id)
+                .request_body(
+                    CreateMessageReactionRequestBody.builder()
+                    .reaction_type(Emoji.builder().emoji_type(emoji).build())
+                    .build()
+                )
+                .build()
+            )
 
-            # 限制集合大小，FIFO 移除旧记录
-            while len(self._reacted_messages) > 1000:
-                self._reacted_messages.popitem(last=False)
+            im = getattr(lark_client, "im", None)
+            if im is None or im.v1 is None or im.v1.message_reaction is None:
+                logger.warning(
+                    "[lark_enhance] lark_client.im.v1.message_reaction 未初始化，无法添加表情"
+                )
+                return "飞书客户端未正确初始化，添加表情失败。"
 
-            logger.info(f"[lark_enhance] Reacted with {emoji} to message {message_id}")
-            return None
+            response = await im.v1.message_reaction.acreate(request)
+
+            if response.success():
+                self._reacted_messages[message_id] = True
+
+                # 限制集合大小，FIFO 移除旧记录
+                while len(self._reacted_messages) > 1000:
+                    self._reacted_messages.popitem(last=False)
+
+                logger.info(f"[lark_enhance] Reacted with {emoji} to message {message_id}")
+                return None
+            else:
+                logger.error(
+                    f"[lark_enhance] React failed: {response.code} - {response.msg}"
+                )
+                return f"添加 {emoji} 表情失败: {response.msg}"
+
         except Exception as e:
             logger.error(f"[lark_enhance] React failed: {e}")
             return f"添加 {emoji} 表情失败"
