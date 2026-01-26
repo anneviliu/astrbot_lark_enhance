@@ -1,6 +1,6 @@
 # AstrBot Lark Enhance Plugin (飞书体验增强插件)
 
-`lark_enhance` 是一个为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 设计的插件，旨在深度优化飞书（Lark/Feishu）平台的使用体验。它通过注入更丰富的上下文信息、解析真实用户昵称、流式卡片输出以及提供原生表情互动能力，让你的机器人更加智能、自然。
+`lark_enhance` 是一个为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 设计的插件，旨在深度优化飞书（Lark/Feishu）平台的使用体验。它通过注入更丰富的上下文信息、解析真实用户昵称、流式卡片输出、用户记忆以及提供原生表情互动能力，让你的机器人更加智能、自然。
 
 ## ✨ 主要功能
 
@@ -20,23 +20,33 @@
 - **群组信息**：自动注入群名称和群描述，帮助 LLM 理解对话场景。
 - **重启保留**：历史记录会保存到本地文件，重启后自动恢复。
 
-### 4. ⌨️ 流式卡片输出（打字机效果）
+### 4. 🧠 用户记忆系统
+让机器人记住每个用户的偏好和信息，提供个性化交互体验。
+- **按群隔离**：每个群的记忆独立存储，不会相互影响。
+- **三种记忆类型**：
+  - `instruction`：持久指令（如"总是用英文回复"）
+  - `preference`：用户偏好（如称呼、回复风格）
+  - `fact`：用户事实（如职业、项目）
+- **自然交互**：用户可以通过自然语言让机器人记住信息，如"记住我叫小王"。
+- **持久化存储**：记忆保存到本地文件，重启后自动恢复。
+
+### 5. ⌨️ 流式卡片输出（打字机效果）
 使用飞书消息卡片实现实时流式输出，让回复过程更加生动。
 - **实时更新**：LLM 生成内容时，卡片会实时更新显示。
 - **加载指示**：输出过程中显示"正在输入..."指示器。
 - **需要配合**：需要在 AstrBot 中启用 LLM 流式输出功能。
 
-### 5. 🔗 @ 提及转换
+### 6. 🔗 @ 提及转换
 让 LLM 能够真正 @ 群成员。
 - **智能识别**：当 LLM 回复中包含 `@张三` 时，自动转换为飞书原生的 @ 提及。
 - **群成员匹配**：基于群成员列表进行精确匹配，确保 @ 到正确的人。
 
-### 6. 😀 原生表情回复工具
+### 7. 😀 原生表情回复工具
 赋予 LLM 使用飞书原生表情（Reactions）的能力。
 - **情感表达**：模型可以使用工具给用户的消息贴上 👍、❤️、😂 等表情。
 - **防刷屏**：每条消息最多只能添加一个表情回复。
 
-### 7. 🧹 上下文清洗
+### 8. 🧹 上下文清洗
 针对 Gemini 等模型对 `tool_calls` 格式敏感的问题，插件会自动清洗历史上下文中的工具调用记录，将其转换为模型易读的文本描述，避免 API 报错。
 
 ## ⚙️ 配置说明
@@ -49,9 +59,11 @@
 | `enable_quoted_content` | bool | `true` | 是否启用引用消息内容注入 |
 | `enable_group_info` | bool | `true` | 是否注入群组信息（群名、群描述） |
 | `enable_context_cleaner` | bool | `true` | 是否启用上下文清洗（推荐开启，尤其是使用 Gemini 时） |
-| `enable_streaming_card` | bool | `false` | 是否启用流式卡片输出（打字机效果），需要 LLM 启用流式输出 |
 | `enable_mention_convert` | bool | `true` | 是否将 LLM 回复中的 @名字 转换为飞书 @ 提及 |
+| `enable_user_memory` | bool | `true` | 是否启用用户记忆功能 |
 | `history_inject_count` | int | `20` | 群聊历史记录数量，设置为 0 可禁用 |
+| `memory_inject_limit` | int | `10` | 每次注入的用户记忆数量上限 |
+| `memory_max_per_user` | int | `20` | 每个用户的最大记忆条数 |
 | `bot_name` | string | `"助手"` | 机器人在群聊历史记录中显示的名称 |
 
 ## 🚀 安装与使用
@@ -70,7 +82,9 @@
   - `im:chat.member:readonly` - 获取群成员列表
   - `im:message:readonly` - 获取消息内容
 - **流式输出**：使用流式卡片功能前，请确保在 AstrBot 的 LLM 配置中启用了流式输出。
-- **数据存储**：群聊历史记录存储在 `data/group_history.json` 文件中。
+- **数据存储**：
+  - 群聊历史记录存储在 `data/plugin_data/astrbot_plugin_lark_enhance/group_history.json`
+  - 用户记忆存储在 `data/plugin_data/astrbot_plugin_lark_enhance/user_memory/` 目录下
 
 ## 📝 License
 

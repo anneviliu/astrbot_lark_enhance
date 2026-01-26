@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from astrbot.api import logger, star
-from astrbot.api.event import AstrMessageEvent, MessageChain, filter
+from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import At, Plain
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import StarTools
@@ -21,6 +21,8 @@ from astrbot.core.message.message_event_result import ResultContentType
 
 # Lark SDK imports (顶部导入，避免方法内 import)
 from lark_oapi.api.im.v1 import (
+    CreateMessageReactionRequest,
+    CreateMessageReactionRequestBody,
     DeleteMessageRequest,
     GetChatRequest,
     GetChatMembersRequest,
@@ -30,6 +32,7 @@ from lark_oapi.api.im.v1 import (
     ReplyMessageRequest,
     ReplyMessageRequestBody,
 )
+from lark_oapi.api.im.v1.model import Emoji
 from lark_oapi.api.contact.v3 import GetUserRequest
 
 # 保存原始的 send_streaming 方法
@@ -255,6 +258,210 @@ class LarkStreamingCard:
             return False
 
 
+class UserMemoryStore:
+    """用户记忆存储管理器 - 按群隔离的用户记忆系统"""
+
+    # 记忆类型优先级（用于排序）
+    TYPE_PRIORITY = {"instruction": 0, "preference": 1, "fact": 2}
+    # 缓存最大群数量
+    _CACHE_MAX_SIZE = 100
+
+    def __init__(self, data_dir: Path):
+        self._data_dir = data_dir / "user_memory"
+        self._data_dir.mkdir(parents=True, exist_ok=True)
+        # 内存缓存: group_id -> group_data（使用 OrderedDict 实现 LRU）
+        self._cache: OrderedDict[str, dict] = OrderedDict()
+
+    def _get_file_path(self, group_id: str) -> Path:
+        """获取群记忆文件路径"""
+        # 使用安全的文件名
+        safe_id = group_id.replace("/", "_").replace("\\", "_")
+        return self._data_dir / f"{safe_id}.json"
+
+    def _load_group_data(self, group_id: str) -> dict:
+        """加载群记忆数据"""
+        if group_id in self._cache:
+            # 移动到末尾（LRU）
+            self._cache.move_to_end(group_id)
+            return self._cache[group_id]
+
+        file_path = self._get_file_path(group_id)
+        if file_path.exists():
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self._set_cache(group_id, data)
+                    return data
+            except Exception as e:
+                logger.error(f"[lark_enhance] Failed to load memory for group {group_id}: {e}")
+
+        # 初始化空数据
+        data = {"group_id": group_id, "users": {}, "updated_at": time.time()}
+        self._set_cache(group_id, data)
+        return data
+
+    def _set_cache(self, group_id: str, data: dict):
+        """设置缓存（带容量限制）"""
+        # 如果已存在，先删除
+        if group_id in self._cache:
+            del self._cache[group_id]
+
+        # 检查容量，移除最老的条目
+        while len(self._cache) >= self._CACHE_MAX_SIZE:
+            self._cache.popitem(last=False)
+
+        self._cache[group_id] = data
+
+    def _save_group_data(self, group_id: str):
+        """保存群记忆数据（立即写入）"""
+        if group_id not in self._cache:
+            return
+
+        try:
+            data = self._cache[group_id]
+            data["updated_at"] = time.time()
+            file_path = self._get_file_path(group_id)
+
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+
+            logger.debug(f"[lark_enhance] Saved memory for group {group_id}")
+        except Exception as e:
+            logger.error(f"[lark_enhance] Failed to save memory for group {group_id}: {e}")
+
+    def add_memory(
+        self,
+        group_id: str,
+        user_id: str,
+        memory_type: str,
+        content: str,
+        max_per_user: int = 20
+    ) -> bool:
+        """添加用户记忆"""
+        if memory_type not in self.TYPE_PRIORITY:
+            logger.warning(f"[lark_enhance] Invalid memory type: {memory_type}")
+            return False
+
+        data = self._load_group_data(group_id)
+
+        if user_id not in data["users"]:
+            data["users"][user_id] = {"memories": []}
+
+        user_data = data["users"][user_id]
+        memories = user_data["memories"]
+
+        # 检查是否存在相似记忆（简单去重：相同类型且内容包含关系）
+        for mem in memories:
+            if mem["type"] == memory_type:
+                # 如果新内容包含旧内容或旧内容包含新内容，更新而非新增
+                if content in mem["content"] or mem["content"] in content:
+                    mem["content"] = content
+                    mem["updated_at"] = time.time()
+                    self._save_group_data(group_id)
+                    logger.info(f"[lark_enhance] Updated memory for user {user_id}: {content[:30]}...")
+                    return True
+
+        # 新增记忆
+        new_memory = {
+            "id": str(uuid.uuid4()),
+            "type": memory_type,
+            "content": content,
+            "created_at": time.time(),
+            "updated_at": time.time()
+        }
+        memories.append(new_memory)
+
+        # 超出限制时，删除最旧的记忆
+        if len(memories) > max_per_user:
+            # 按 updated_at 排序，删除最旧的
+            memories.sort(key=lambda x: x["updated_at"], reverse=True)
+            removed = memories[max_per_user:]
+            user_data["memories"] = memories[:max_per_user]
+            logger.debug(f"[lark_enhance] Removed {len(removed)} old memories for user {user_id}")
+
+        self._save_group_data(group_id)
+        logger.info(f"[lark_enhance] Added memory for user {user_id}: {content[:30]}...")
+        return True
+
+    def get_memories(
+        self,
+        group_id: str,
+        user_id: str,
+        limit: int = 10
+    ) -> list[dict]:
+        """获取用户记忆（按优先级和时间排序）"""
+        data = self._load_group_data(group_id)
+
+        if user_id not in data["users"]:
+            return []
+
+        memories = data["users"][user_id]["memories"]
+
+        # 按优先级和更新时间排序
+        sorted_memories = sorted(
+            memories,
+            key=lambda x: (
+                self.TYPE_PRIORITY.get(x["type"], 99),
+                -x["updated_at"]
+            )
+        )
+
+        return sorted_memories[:limit]
+
+    def delete_memories(
+        self,
+        group_id: str,
+        user_id: str,
+        target: str = "all"
+    ) -> int:
+        """删除用户记忆，返回删除数量"""
+        data = self._load_group_data(group_id)
+
+        if user_id not in data["users"]:
+            return 0
+
+        user_data = data["users"][user_id]
+        memories = user_data["memories"]
+        original_count = len(memories)
+
+        if target == "all":
+            # 一键清除所有记忆
+            user_data["memories"] = []
+            deleted_count = original_count
+        else:
+            # 匹配删除：检查 content 是否包含 target 关键词
+            target_lower = target.lower()
+            user_data["memories"] = [
+                mem for mem in memories
+                if target_lower not in mem["content"].lower()
+            ]
+            deleted_count = original_count - len(user_data["memories"])
+
+        if deleted_count > 0:
+            self._save_group_data(group_id)
+            logger.info(f"[lark_enhance] Deleted {deleted_count} memories for user {user_id}")
+
+        return deleted_count
+
+    def format_memories_for_prompt(self, memories: list[dict]) -> str:
+        """格式化记忆列表用于 prompt 注入"""
+        if not memories:
+            return ""
+
+        type_labels = {
+            "instruction": "指令",
+            "preference": "偏好",
+            "fact": "事实"
+        }
+
+        lines = []
+        for mem in memories:
+            type_label = type_labels.get(mem["type"], mem["type"])
+            lines.append(f"- {mem['content']}（{type_label}）")
+
+        return "\n".join(lines)
+
+
 class Main(star.Star):
     # 缓存 TTL (秒)
     _CACHE_TTL = 300  # 5 分钟
@@ -302,6 +509,9 @@ class Main(star.Star):
         # 加载持久化的历史记录
         self._load_history()
 
+        # 初始化用户记忆存储
+        self._memory_store = UserMemoryStore(self._data_dir)
+
         # 注册退出时保存
         atexit.register(self._atexit_save)
 
@@ -310,9 +520,8 @@ class Main(star.Star):
         _streaming_config = self.config
         _clean_content_func = self._clean_content
 
-        # 设置流式卡片的 monkey patch
-        if self.config.get("enable_streaming_card", False):
-            self._setup_streaming_patch()
+        # 设置流式卡片的 monkey patch（当 AstrBot 启用流式输出时自动使用卡片展示）
+        self._setup_streaming_patch()
 
     def _atexit_save(self):
         """程序退出时保存历史记录"""
@@ -338,8 +547,8 @@ class Main(star.Star):
     def _setup_streaming_patch(self):
         """设置流式卡片的 monkey patch
 
+        当 AstrBot 框架启用流式输出时，自动使用飞书卡片展示打字机效果。
         注意：Monkey Patch 是一种临时方案，可能在框架更新后失效。
-        如果遇到兼容性问题，请在配置中禁用 enable_streaming_card。
         长期方案是向 AstrBot 框架提交 PR，提供官方的流式输出 Hook。
         """
         global _original_lark_send_streaming
@@ -357,7 +566,6 @@ class Main(star.Star):
                 return
 
             # 检查方法签名是否符合预期（简单检查）
-            import inspect
             sig = inspect.signature(LarkMessageEvent.send_streaming)
             params = list(sig.parameters.keys())
             if "generator" not in params:
@@ -376,10 +584,6 @@ class Main(star.Star):
 
             async def patched_send_streaming(event_self, generator, use_fallback: bool = False):
                 """Monkey-patched send_streaming 方法，使用流式卡片"""
-                # 检查全局配置是否启用
-                if not _streaming_config or not _streaming_config.get("enable_streaming_card", False):
-                    return await _original_lark_send_streaming(event_self, generator, use_fallback)
-
                 # 检查是否是飞书事件
                 if not hasattr(event_self, "bot") or event_self.bot is None:
                     return await _original_lark_send_streaming(event_self, generator, use_fallback)
@@ -1076,6 +1280,15 @@ class Main(star.Star):
             "禁止输出类似 [{'type': 'text', 'text': '...'}] 这样的格式。"
         )
 
+        # 0.5 记忆功能提示（仅在启用时）
+        if self.config.get("enable_user_memory", True):
+            prompts_to_inject.append(
+                "[记忆功能]\n"
+                "你具有记忆用户信息的能力。当用户要求你记住某些信息（如称呼、职业、偏好等）时，"
+                "请使用 lark_save_memory 工具保存。当用户询问你记得什么时，使用 lark_list_memory 工具查询。"
+                "当用户要求忘记信息时，使用 lark_forget_memory 工具删除。"
+            )
+
         # 1. 注入群组信息
         if self.config.get("enable_group_info", True):
             group_info = event.get_extra("lark_group_info")
@@ -1125,18 +1338,32 @@ class Main(star.Star):
                         f"\n[当前群聊最近 {len(recent_history)} 条消息记录（仅供参考，不包含当前消息）]\n{history_str}\n"
                     )
 
+        # 4. 注入用户记忆
+        if self.config.get("enable_user_memory", True) and group_id:
+            sender_id = event.get_sender_id()
+            if sender_id:
+                inject_limit = self.config.get("memory_inject_limit", 10)
+                memories = self._memory_store.get_memories(group_id, sender_id, limit=inject_limit)
+                if memories:
+                    memory_str = self._memory_store.format_memories_for_prompt(memories)
+                    sender_name = event.message_obj.sender.nickname or sender_id
+                    prompts_to_inject.append(
+                        f"[关于当前用户「{sender_name}」的记忆]\n{memory_str}"
+                    )
+                    logger.debug(f"[lark_enhance] Injected {len(memories)} memories for user {sender_id}")
+
         if prompts_to_inject:
             final_inject = (
                 "\n----------------\n".join(prompts_to_inject) + "\n----------------\n\n"
             )
             req.system_prompt = (req.system_prompt or "") + "\n\n" + final_inject
 
-        # 调试日志
-        logger.debug("=" * 20 + " [lark_enhance] LLM Request Payload " + "=" * 20)
-        logger.debug(f"System Prompt: {req.system_prompt}")
-        logger.debug(f"Contexts (History): {req.contexts}")
-        logger.debug(f"Current Prompt: {req.prompt}")
-        logger.debug("=" * 60)
+        # 打印输入给 LLM 的原始内容
+        logger.info("=" * 20 + " [lark_enhance] LLM Request Payload " + "=" * 20)
+        logger.info(f"System Prompt:\n{req.system_prompt}")
+        logger.info(f"Contexts (History):\n{json.dumps(req.contexts, ensure_ascii=False, indent=2)}")
+        logger.info(f"Current Prompt:\n{req.prompt}")
+        logger.info("=" * 60)
 
     @filter.llm_tool(name="lark_emoji_reply")
     async def lark_emoji_reply(self, event: AstrMessageEvent, emoji: str):
@@ -1170,19 +1397,187 @@ class Main(star.Star):
             )
             return "该消息已添加过表情回复，每条消息只能添加一个表情。"
 
+        lark_client = self._get_lark_client(event)
+        if lark_client is None:
+            logger.warning("[lark_enhance] lark_client is None, cannot add emoji reaction")
+            return "无法获取飞书客户端，添加表情失败。"
+
         try:
-            await event.react(emoji)
-            self._reacted_messages[message_id] = True
+            # 使用 Lark SDK 直接调用 API 添加表情回复
+            request = (
+                CreateMessageReactionRequest.builder()
+                .message_id(message_id)
+                .request_body(
+                    CreateMessageReactionRequestBody.builder()
+                    .reaction_type(Emoji.builder().emoji_type(emoji).build())
+                    .build()
+                )
+                .build()
+            )
 
-            # 限制集合大小，FIFO 移除旧记录
-            while len(self._reacted_messages) > 1000:
-                self._reacted_messages.popitem(last=False)
+            im = getattr(lark_client, "im", None)
+            if im is None or im.v1 is None or im.v1.message_reaction is None:
+                logger.warning(
+                    "[lark_enhance] lark_client.im.v1.message_reaction 未初始化，无法添加表情"
+                )
+                return "飞书客户端未正确初始化，添加表情失败。"
 
-            logger.info(f"[lark_enhance] Reacted with {emoji} to message {message_id}")
-            return None
+            response = await im.v1.message_reaction.acreate(request)
+
+            if response.success():
+                self._reacted_messages[message_id] = True
+
+                # 限制集合大小，FIFO 移除旧记录
+                while len(self._reacted_messages) > 1000:
+                    self._reacted_messages.popitem(last=False)
+
+                logger.info(f"[lark_enhance] Reacted with {emoji} to message {message_id}")
+                return None
+            else:
+                logger.error(
+                    f"[lark_enhance] React failed: {response.code} - {response.msg}"
+                )
+                return f"添加 {emoji} 表情失败: {response.msg}"
+
         except Exception as e:
             logger.error(f"[lark_enhance] React failed: {e}")
             return f"添加 {emoji} 表情失败"
+
+    @filter.llm_tool(name="lark_save_memory")
+    async def lark_save_memory(
+        self,
+        event: AstrMessageEvent,
+        memory_type: str,
+        content: str
+    ):
+        """保存当前群内用户的记忆。当用户明确要求记住某些信息时使用此工具。
+
+        记忆仅在当前群生效，不会影响用户在其他群的交互。
+
+        Args:
+            memory_type(string): 记忆类型，必须是以下之一：
+                - preference: 用户偏好（如称呼、回复风格、语言偏好）
+                - fact: 用户事实（如职业、负责的项目、技能特长）
+                - instruction: 持久指令（如"总是用英文回复"、"不要用表情"）
+            content(string): 要记住的内容，用简洁的陈述句描述（如"希望被称呼为小王"、"是后端开发工程师"）
+        """
+        if not self._is_lark_event(event):
+            return "不是飞书平台，无法使用记忆功能。"
+
+        if not self.config.get("enable_user_memory", True):
+            return "记忆功能未启用。"
+
+        group_id = event.message_obj.group_id
+        if not group_id:
+            return "记忆功能仅在群聊中可用。"
+
+        sender_id = event.get_sender_id()
+        if not sender_id:
+            return "无法获取用户信息。"
+
+        # 验证记忆类型
+        valid_types = {"preference", "fact", "instruction"}
+        if memory_type not in valid_types:
+            return f"无效的记忆类型。请使用: {', '.join(valid_types)}"
+
+        max_per_user = self.config.get("memory_max_per_user", 20)
+        success = self._memory_store.add_memory(
+            group_id=group_id,
+            user_id=sender_id,
+            memory_type=memory_type,
+            content=content,
+            max_per_user=max_per_user
+        )
+
+        if success:
+            return f"好的，我记住了：{content}"
+        else:
+            return "保存记忆失败，请稍后重试。"
+
+    @filter.llm_tool(name="lark_list_memory")
+    async def lark_list_memory(self, event: AstrMessageEvent):
+        """查询用户在当前群的所有记忆。当用户询问"你记得我什么"、"你对我有什么印象"时使用此工具。
+
+        返回该用户在当前群的所有记忆列表。
+        """
+        if not self._is_lark_event(event):
+            return "不是飞书平台，无法使用记忆功能。"
+
+        if not self.config.get("enable_user_memory", True):
+            return "记忆功能未启用。"
+
+        group_id = event.message_obj.group_id
+        if not group_id:
+            return "记忆功能仅在群聊中可用。"
+
+        sender_id = event.get_sender_id()
+        if not sender_id:
+            return "无法获取用户信息。"
+
+        memories = self._memory_store.get_memories(group_id, sender_id, limit=50)
+
+        if not memories:
+            return "我还没有记住关于你的任何信息。"
+
+        memory_str = self._memory_store.format_memories_for_prompt(memories)
+        return f"在这个群里，我记得关于你的以下信息：\n{memory_str}"
+
+    @filter.llm_tool(name="lark_forget_memory")
+    async def lark_forget_memory(self, event: AstrMessageEvent, target: str = "all"):
+        """删除用户在当前群的记忆。当用户要求忘记某些信息或清除所有记忆时使用此工具。
+
+        Args:
+            target(string): 删除目标
+                - "all": 一键清除所有记忆
+                - 具体关键词: 删除包含该关键词的记忆（如"称呼"、"职业"、"英文"）
+        """
+        if not self._is_lark_event(event):
+            return "不是飞书平台，无法使用记忆功能。"
+
+        if not self.config.get("enable_user_memory", True):
+            return "记忆功能未启用。"
+
+        group_id = event.message_obj.group_id
+        if not group_id:
+            return "记忆功能仅在群聊中可用。"
+
+        sender_id = event.get_sender_id()
+        if not sender_id:
+            return "无法获取用户信息。"
+
+        deleted_count = self._memory_store.delete_memories(group_id, sender_id, target)
+
+        if deleted_count == 0:
+            if target == "all":
+                return "没有找到任何记忆需要删除。"
+            else:
+                return f"没有找到包含「{target}」的记忆。"
+
+        if target == "all":
+            return f"好的，我已经清除了在这个群里关于你的所有记忆（共 {deleted_count} 条）。"
+        else:
+            return f"好的，我已经删除了包含「{target}」的记忆（共 {deleted_count} 条）。"
+
+    # 预编译的正则：清理 @ 周围的 Markdown 格式
+    # 匹配 **@xxx**、*@xxx*、__@xxx__、_@xxx_ 等模式，包括中间可能有的换行
+    _MENTION_MARKDOWN_PATTERNS = [
+        re.compile(r"\*\*\s*(@[^\s\*]+)\s*\*\*"),   # **@xxx**
+        re.compile(r"(?<!\*)\*\s*(@[^\s\*]+)\s*\*(?!\*)"),  # *@xxx* (非 **)
+        re.compile(r"__\s*(@[^\s_]+)\s*__"),         # __@xxx__
+        re.compile(r"(?<!_)_\s*(@[^\s_]+)\s*_(?!_)"), # _@xxx_ (非 __)
+        re.compile(r"~~\s*(@[^\s~]+)\s*~~"),         # ~~@xxx~~
+        re.compile(r"`\s*(@[^\s`]+)\s*`"),           # `@xxx`
+    ]
+
+    def _clean_mention_markdown(self, text: str) -> str:
+        """清理 @ 提及周围的 Markdown 格式符号
+
+        将 **@名字** 、 *@名字* 、 __@名字__ 等转换为干净的 @名字
+        """
+        result = text
+        for pattern in self._MENTION_MARKDOWN_PATTERNS:
+            result = pattern.sub(r"\1", result)
+        return result
 
     def _get_mention_pattern(self, group_id: str, members_map: dict[str, str]) -> re.Pattern | None:
         """获取或创建 @ 提及匹配的正则表达式（带缓存）"""
@@ -1195,14 +1590,14 @@ class Main(star.Star):
         if not members_map:
             return None
 
-        # 构建正则模式，添加边界检查避免误匹配
+        # 构建正则模式
         sorted_names = sorted(members_map.keys(), key=len, reverse=True)
         if not sorted_names:
             return None
 
         escaped_names = [re.escape(name) for name in sorted_names]
-        # 使用负向后行断言，确保 @ 前面不是字母数字或其他 @
-        pattern = re.compile(r"(?<![a-zA-Z0-9@])@(" + "|".join(escaped_names) + r")(?![a-zA-Z0-9])")
+        # 简单匹配 @名字，Markdown 清理在预处理阶段完成
+        pattern = re.compile(r"@(" + "|".join(escaped_names) + r")")
 
         self._mention_pattern_cache[group_id] = (pattern, time.time())
         return pattern
@@ -1217,11 +1612,8 @@ class Main(star.Star):
         if result is None or not result.chain:
             return
 
-        # 如果启用了流式卡片且是流式完成状态，跳过处理（已由流式卡片处理）
-        if (
-            self.config.get("enable_streaming_card", False)
-            and result.result_content_type == ResultContentType.STREAMING_FINISH
-        ):
+        # 如果是流式完成状态，跳过处理（已由流式卡片处理）
+        if result.result_content_type == ResultContentType.STREAMING_FINISH:
             return
 
         # 第一步：清洗消息内容（处理 LLM 输出的序列化格式）
@@ -1229,9 +1621,11 @@ class Main(star.Star):
         for comp in result.chain:
             if isinstance(comp, Plain):
                 cleaned_text = self._clean_content(comp.text)
+                # 清理 @ 周围的 Markdown 格式符号（如 **@名字** -> @名字）
+                cleaned_text = self._clean_mention_markdown(cleaned_text)
                 if cleaned_text != comp.text:
-                    logger.info(
-                        f"[lark_enhance] Cleaned message format: {comp.text[:50]}... -> {cleaned_text[:50]}..."
+                    logger.debug(
+                        f"[lark_enhance] Cleaned message: {comp.text[:50]}... -> {cleaned_text[:50]}..."
                     )
                 cleaned_chain.append(Plain(cleaned_text))
             else:
@@ -1278,8 +1672,15 @@ class Main(star.Star):
                 if not open_id:
                     continue
 
-                if match.start() > last_end:
-                    segments.append(Plain(text[last_end : match.start()]))
+                # 获取 @ 前面的文本
+                before_text = text[last_end : match.start()]
+                # 清理 @ 前面的多余空白和换行（保留一个空格）
+                if before_text:
+                    before_text = before_text.rstrip()
+                    if before_text:
+                        # 如果清理后还有内容，加一个空格分隔
+                        before_text += " "
+                    segments.append(Plain(before_text))
 
                 segments.append(At(qq=open_id, name=name))
                 last_end = match.end()
@@ -1289,7 +1690,12 @@ class Main(star.Star):
                 )
 
             if last_end < len(text):
-                segments.append(Plain(text[last_end:]))
+                # 清理 @ 后面开头的多余空白和换行
+                after_text = text[last_end:]
+                after_text = after_text.lstrip()
+                if after_text:
+                    # 如果有内容，前面加一个空格分隔
+                    segments.append(Plain(" " + after_text))
 
             if segments:
                 new_chain.extend(segments)

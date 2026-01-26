@@ -19,11 +19,6 @@
         "type": "bool",
         "default": true
     },
-    "enable_streaming_card": {
-        "description": "是否启用流式卡片输出（使用飞书消息卡片实现打字机效果，需要 LLM 启用流式输出）",
-        "type": "bool",
-        "default": false
-    },
     "history_inject_count": {
         "description": "本地记录群聊历史消息的数量（0 表示禁用）。启用后，插件将自动记录群组最近的 N 条消息，并在对话时提供给 LLM 作为背景上下文。",
         "type": "int",
@@ -38,5 +33,20 @@
         "description": "是否启用 @ 转换功能（将 LLM 回复中的 @名字 自动转换为飞书 @ 提及）",
         "type": "bool",
         "default": true
+    },
+    "enable_user_memory": {
+        "description": "是否启用用户记忆功能（记住用户在群内的偏好、信息和指令）",
+        "type": "bool",
+        "default": true
+    },
+    "memory_max_per_user": {
+        "description": "每个用户在每个群内最多保存的记忆条数",
+        "type": "int",
+        "default": 20
+    },
+    "memory_inject_limit": {
+        "description": "每次请求 LLM 时最多注入的记忆条数",
+        "type": "int",
+        "default": 10
     }
 }
