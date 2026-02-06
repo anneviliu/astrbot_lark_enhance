@@ -14,10 +14,10 @@
         "type": "bool",
         "default": true
     },
-    "enable_context_cleaner": {
-        "description": "是否启用 Context 清洗（规避 Gemini thought_signature 报错）",
+    "enable_streaming_card": {
+        "description": "是否启用流式卡片输出（打字机效果，需同时开启 AstrBot 的流式输出）",
         "type": "bool",
-        "default": true
+        "default": false
     },
     "history_inject_count": {
         "description": "本地记录群聊历史消息的数量（0 表示禁用）。启用后，插件将自动记录群组最近的 N 条消息，并在对话时提供给 LLM 作为背景上下文。",
@@ -43,6 +43,11 @@
         "description": "每个用户在每个群内最多保存的记忆条数",
         "type": "int",
         "default": 20
+    },
+    "memory_max_per_group": {
+        "description": "每个群最多保存的群维度记忆条数",
+        "type": "int",
+        "default": 30
     },
     "memory_inject_limit": {
         "description": "每次请求 LLM 时最多注入的记忆条数",

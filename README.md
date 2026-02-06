@@ -12,6 +12,7 @@
 ### 2. 💬 引用消息穿透
 当用户回复某条消息时，LLM 通常无法看到原消息内容。
 本插件会自动抓取用户引用的消息内容，并将其作为背景信息注入到 Prompt 中，让 LLM 能够理解"回复"的上下文。
+- 如果被引用消息包含图片，插件会把图片作为多模态输入一并注入当前请求（使用 AstrBot 当前配置的多模态模型能力）。
 
 ### 3. 🏘️ 群聊上下文感知
 在群聊场景中，用户往往省略背景信息直接提问。
@@ -46,9 +47,6 @@
 - **情感表达**：模型可以使用工具给用户的消息贴上 👍、❤️、😂 等表情。
 - **防刷屏**：每条消息最多只能添加一个表情回复。
 
-### 8. 🧹 上下文清洗
-针对 Gemini 等模型对 `tool_calls` 格式敏感的问题，插件会自动清洗历史上下文中的工具调用记录，将其转换为模型易读的文本描述，避免 API 报错。
-
 ## ⚙️ 配置说明
 
 插件支持通过 AstrBot 仪表盘或直接修改配置文件进行配置。
@@ -58,7 +56,7 @@
 | `enable_real_name` | bool | `true` | 是否启用真实姓名解析 |
 | `enable_quoted_content` | bool | `true` | 是否启用引用消息内容注入 |
 | `enable_group_info` | bool | `true` | 是否注入群组信息（群名、群描述） |
-| `enable_context_cleaner` | bool | `true` | 是否启用上下文清洗（推荐开启，尤其是使用 Gemini 时） |
+| `enable_streaming_card` | bool | `false` | 是否启用流式卡片输出（打字机效果，需要同时开启 AstrBot 流式输出） |
 | `enable_mention_convert` | bool | `true` | 是否将 LLM 回复中的 @名字 转换为飞书 @ 提及 |
 | `enable_user_memory` | bool | `true` | 是否启用用户记忆功能 |
 | `history_inject_count` | int | `20` | 群聊历史记录数量，设置为 0 可禁用 |
