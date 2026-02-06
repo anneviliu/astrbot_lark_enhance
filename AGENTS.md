@@ -1,113 +1,138 @@
-# Lark Enhance Plugin Architecture
+# lark_enhance 开发协作指南（AGENTS）
 
-## 1. Project Overview
+## 1. 项目定位
 
-`lark_enhance` is an AstrBot plugin designed to deepen the integration with the Lark (Feishu) IM platform. It enhances the conversational experience by providing context that is otherwise missing from standard message events, such as real user nicknames, quoted message content, recent group chat history, and streaming card output.
+`lark_enhance` 是 AstrBot 的 Lark（飞书）增强插件，目标是让 LLM 在群聊场景中获得更完整的上下文，并提升输出可用性。
 
-### High-Level Architecture
+核心增强能力：
+- OpenID/mention 解析为真实昵称。
+- 引用消息内容回填到当前对话。
+- 群聊历史持久化与注入。
+- 群信息（名称/描述）注入。
+- `@名字` 自动转换为飞书 `At` 组件。
+- 流式卡片打字机输出（Patch API）。
+- 用户记忆（群维度 + 用户维度）存储与注入。
+- 工具：`lark_emoji_reply`（单条消息限一次反应）。
 
-The plugin functions as a **Star** (AstrBot plugin) and hooks into the event lifecycle:
+## 2. 运行环境与安装
 
-1.  **Message Pre-processing (`on_message`)**:
-    *   **User Resolution**: Intercepts incoming messages to resolve OpenIDs (e.g., in `@mentions` or sender fields) to real nicknames using the Lark API. This ensures the LLM knows who is talking.
-    *   **History Recording**: Maintains a sliding window of recent group messages with **persistent storage** (`data/group_history.json`). This allows the bot to understand context across restarts.
-    *   **Content Cleaning**: Sanitizes message content to remove internal JSON/Python object representations, ensuring the LLM receives clean text.
-    *   **Quote Handling**: Detects if a user is replying to another message, fetches the original quoted content, and attaches it to the event context.
-    *   **Group Info**: Fetches group name and description for context injection.
+- Python: 3.10+
+- 依赖：见 `requirements.txt`（主要为 `lark-oapi`）
+- 插件路径：`AstrBot/data/plugins/astrbot_lark_enhance`
 
-2.  **LLM Request Intervention (`on_llm_request`)**:
-    *   **Context Injection**: Before sending a request to the LLM, the plugin injects:
-        *   Group information (name, description).
-        *   The content of the message being quoted (if any).
-        *   The recent group chat history (from persistent storage).
-    *   **Safety Cleaning**: Scrubs `tool_calls` and intermediate tool outputs from the conversation history to prevent compatibility issues with certain LLM providers (e.g., Gemini).
+安装/更新：
+1. 将插件目录放入 `data/plugins/`。
+2. 执行：`pip install -r requirements.txt`。
+3. 重启 AstrBot。
+4. 更新时在插件目录执行 `git pull` 后重启。
 
-3.  **Result Decoration (`on_decorating_result`)**:
-    *   **Content Cleaning**: Cleans LLM output that may contain serialized format (e.g., `[{'type': 'text', 'text': '...'}]`).
-    *   **Mention Conversion**: Converts `@Name` patterns in LLM responses to actual Lark `At` components, enabling real @ mentions in group chats.
+## 3. 代码结构与关键文件
 
-4.  **Streaming Card Output**:
-    *   **Typewriter Effect**: When enabled, uses Lark message cards with real-time updates (via Patch API) to display LLM output progressively, creating a typewriter effect.
-    *   **Implementation**: Uses monkey-patching of `LarkMessageEvent.send_streaming` to intercept streaming output.
+- `main.py`: 插件主体（事件钩子、缓存、历史、记忆、流式卡片、工具实现）。
+- `_conf_schema.json`: 配置定义与默认值。
+- `metadata.yaml`: 插件元信息。
+- `data/group_history.json`: 群聊历史持久化。
 
-5.  **Tools**:
-    *   **`lark_emoji_reply`**: Exposes a tool allowing the LLM to react to messages with emojis (e.g., THUMBSUP, HEART). Limited to **one reaction per message** to prevent spam.
+## 4. 事件流（按执行顺序）
 
-## 2. Build & Commands
+### 4.1 `on_message`
 
-This project is an AstrBot plugin and relies on the AstrBot runtime.
+主要职责：
+- 校验平台为 Lark。
+- 真实昵称解析（发送者/mentions）。
+- 清理消息内容中的序列化噪声。
+- 处理引用消息，拉取被引用内容与发送者。
+- 若引用消息含图片，下载后作为多模态输入素材。
+- 记录群聊历史（滑动窗口 + 持久化）。
+- 拉取并缓存群信息。
 
-*   **Runtime**: Python 3.10+
-*   **Dependencies**: Listed in `requirements.txt` (primary dependency: `lark-oapi`).
-*   **Installation**:
-    1.  Place the `lark_enhance` directory into `data/plugins/`.
-    2.  Install dependencies: `pip install -r requirements.txt`.
-    3.  Restart AstrBot.
-*   **Update**: `git pull` in the plugin directory and restart AstrBot.
+### 4.2 `on_llm_request`
 
-## 3. Code Style
+主要职责：
+- 注入群信息、引用消息、历史消息。
+- 将引用图片注入 `req.image_urls` 供当前多模态模型理解。
+- 注入用户记忆（开启时）。
 
-*   **Standard**: PEP 8.
-*   **Type Hints**: Fully typed code structure (`main.py`).
-*   **Async/Await**: Extensive use of `asyncio` for non-blocking Lark API calls.
-*   **Logging**: Uses `astrbot.core.logger` with the `[lark_enhance]` prefix for easy filtering.
-*   **Error Handling**: API calls are wrapped in `try-except` blocks to ensure plugin failures do not crash the main bot process.
-*   **Caching**: Uses TTL-based caching (5 minutes) for group members and group info to reduce API calls.
-*   **Debouncing**: History saves are debounced (5 seconds) to reduce disk I/O.
+### 4.3 `on_decorating_result`
 
-## 4. Testing
+主要职责：
+- 清理模型输出中的结构化噪声。
+- 将 `@名字` 转换为飞书可识别 mention 组件。
 
-*   **Manual Testing**:
-    *   **Mentions**: @Mention the bot or other users to verify nickname resolution.
-    *   **Mention Conversion**: Ask the bot to "@someone" and verify it creates a real Lark mention.
-    *   **Quotes**: Reply to a message and check if the bot understands the context of the replied message.
-    *   **History**: Chat in a group and ask the bot to summarize recent discussions.
-    *   **Reactions**: Ask the bot to "give me a like" to test `lark_emoji_reply`.
-    *   **Streaming Card**: Enable `enable_streaming_card` and verify typewriter effect in Lark.
-*   **Debugging**: Enable debug logging in AstrBot to see detailed `[lark_enhance]` logs, including history recording and prompt injection payloads.
+## 5. 流式卡片实现
 
-## 5. Security
+开启 `enable_streaming_card` 后：
+- 通过 monkey patch 替换 `LarkMessageEvent.send_streaming`。
+- 使用 `LarkStreamingCard` 创建、增量更新、最终完成卡片。
+- 走 `im.v1.message.patch`（代码使用 `apatch`）更新内容。
+- 内置节流策略，平衡实时性与 API 压力。
 
-*   **Data Privacy**:
-    *   Group history is stored in `data/group_history.json` with minimal information (timestamp, sender name, content).
-    *   Sensitive data (like user full names) is fetched via API and cached in memory (`self.user_cache`) to minimize API exposure.
-*   **Access Control**:
-    *   Gracefully handles `41050` (Permission Denied) errors from Lark API if the bot lacks contact reading permissions.
-    *   Validates `event.get_platform_name() == "lark"` before executing platform-specific logic.
+## 6. 持久化与缓存策略
 
-## 6. Configuration
+### 6.1 群历史
+- 存储文件：`data/group_history.json`
+- 触发：接收消息与机器人发言时更新
+- 保存：防抖写盘
+- 清理：`/reset` 会清空当前群历史
 
-Configuration is managed via `_conf_schema.json` and loaded into `self.config`.
+### 6.2 缓存
+- 用户昵称缓存：LRU + TTL
+- 群成员缓存：TTL（用于 mention 转换）
+- 群信息缓存：TTL（用于上下文注入）
+- mention 正则缓存：TTL
 
-| Key | Type | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `enable_real_name` | bool | `true` | Resolve OpenIDs to real nicknames. |
-| `enable_quoted_content` | bool | `true` | Fetch and inject quoted message content. |
-| `enable_group_info` | bool | `true` | Inject group name/description into system prompt. |
-| `enable_context_cleaner` | bool | `true` | Sanitize context to prevent LLM errors (Gemini compatibility). |
-| `enable_streaming_card` | bool | `false` | Use streaming card messages for typewriter effect. Requires LLM streaming to be enabled. |
-| `history_inject_count` | int | `20` | Number of recent group messages to keep and inject into prompt. Set to `0` to disable. |
-| `bot_name` | string | `"助手"` | Bot's display name in group chat history records. |
-| `enable_mention_convert` | bool | `true` | Convert `@Name` in LLM responses to real Lark mentions. |
+## 7. 用户记忆功能
 
-## 7. Key Implementation Details
+当 `enable_user_memory=true`：
+- 记录用户偏好/事实/指令等记忆。
+- 按群和用户维度管理。
+- 受 `memory_max_per_user`、`memory_max_per_group` 限制。
+- 每次请求按 `memory_inject_limit` 注入到 LLM 请求上下文。
 
-### Streaming Card (Typewriter Effect)
+## 8. 配置项（与 `_conf_schema.json` 对齐）
 
-The streaming card feature uses:
-1. **`LarkStreamingCard` class**: Manages card creation, updates, and finalization.
-2. **Monkey-patching**: Replaces `LarkMessageEvent.send_streaming` at plugin initialization.
-3. **Debounced updates**: Updates card every 0.3s or 5 characters to balance responsiveness and API limits.
-4. **Patch API**: Uses Lark's `im.v1.message.patch` endpoint for real-time card content updates.
+| Key | Type | Default | 说明 |
+|---|---|---:|---|
+| `enable_real_name` | bool | `true` | 启用真实姓名转换 |
+| `enable_quoted_content` | bool | `true` | 启用引用消息增强 |
+| `enable_group_info` | bool | `true` | 注入群名称/描述到上下文 |
+| `enable_streaming_card` | bool | `false` | 启用流式卡片输出（需同时开启 AstrBot 流式输出） |
+| `history_inject_count` | int | `20` | 历史记录与注入条数，`0` 表示禁用 |
+| `bot_name` | string | `"助手"` | 机器人在历史中的显示名 |
+| `enable_mention_convert` | bool | `true` | 启用 `@名字` 转飞书 mention |
+| `enable_user_memory` | bool | `true` | 启用用户记忆 |
+| `memory_max_per_user` | int | `20` | 每用户每群最大记忆条数 |
+| `memory_max_per_group` | int | `30` | 每群最大群维度记忆条数 |
+| `memory_inject_limit` | int | `10` | 每次请求最大注入记忆条数 |
 
-### History Persistence
+## 9. 开发规范
 
-- History is saved to `data/group_history.json` with debouncing (5-second interval).
-- Loaded on plugin initialization, survives AstrBot restarts.
-- Cleared when user sends `/reset` command.
+- 遵循 PEP 8，优先完整类型注解。
+- 使用 `async/await`，避免阻塞 I/O。
+- 日志统一使用 `[lark_enhance]` 前缀。
+- 对外部 API 调用必须 `try-except` 包裹，避免影响主进程。
+- 新增配置必须同时更新 `_conf_schema.json` 与本文档。
 
-### Caching Strategy
+## 10. 手工测试清单
 
-- **User cache**: In-memory, no TTL (nicknames rarely change).
-- **Group members cache**: 5-minute TTL, used for @ mention conversion.
-- **Group info cache**: 5-minute TTL, used for context injection.
+最小回归建议：
+1. 提及解析：消息含 `@` 时，LLM 获取到真实昵称。
+2. 提及转换：模型输出 `@某人` 后实际变成飞书 mention。
+3. 引用增强：回复他人消息时，模型能理解被引用内容。
+4. 历史注入：连续对话后可引用近期上下文。
+5. 记忆注入：多轮后能记住用户偏好并复用。
+6. 反应工具：`lark_emoji_reply` 生效且不会重复刷反应。
+7. 流式卡片：开启后可稳定增量刷新并最终收敛。
+8. `/reset`：仅清理当前群历史。
+
+## 11. 安全与边界
+
+- 仅在 Lark 平台执行 Lark 特定逻辑。
+- 对 `41050` 等权限错误要降级处理，不中断主流程。
+- 持久化文件只存最小必要信息，避免扩散敏感数据。
+
+## 12. 常见变更建议
+
+- 涉及 prompt 注入逻辑时，优先保证“可解释、可回滚、可观测”（日志可追踪）。
+- 涉及缓存/持久化结构变更时，考虑旧数据兼容与异常恢复。
+- 涉及 monkey patch 时，必须保持回退路径（fallback 到原始流式发送）。

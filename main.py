@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import atexit
-import copy
 import datetime
 import inspect
 import json
@@ -27,6 +26,7 @@ from lark_oapi.api.im.v1 import (
     GetChatRequest,
     GetChatMembersRequest,
     GetMessageRequest,
+    GetMessageResourceRequest,
     PatchMessageRequest,
     PatchMessageRequestBody,
     ReplyMessageRequest,
@@ -443,6 +443,115 @@ class UserMemoryStore:
 
         return deleted_count
 
+    def add_group_memory(
+        self,
+        group_id: str,
+        memory_type: str,
+        content: str,
+        max_per_group: int = 30
+    ) -> bool:
+        """添加群级别记忆（所有群成员共享）"""
+        if memory_type not in self.TYPE_PRIORITY:
+            logger.warning(f"[lark_enhance] Invalid memory type: {memory_type}")
+            return False
+
+        data = self._load_group_data(group_id)
+
+        if "group_memories" not in data:
+            data["group_memories"] = []
+
+        memories = data["group_memories"]
+
+        # 检查是否存在相似记忆（简单去重：相同类型且内容包含关系）
+        for mem in memories:
+            if mem["type"] == memory_type:
+                # 如果新内容包含旧内容或旧内容包含新内容，更新而非新增
+                if content in mem["content"] or mem["content"] in content:
+                    mem["content"] = content
+                    mem["updated_at"] = time.time()
+                    self._save_group_data(group_id)
+                    logger.info(f"[lark_enhance] Updated group memory for {group_id}: {content[:30]}...")
+                    return True
+
+        # 新增记忆
+        new_memory = {
+            "id": str(uuid.uuid4()),
+            "type": memory_type,
+            "content": content,
+            "created_at": time.time(),
+            "updated_at": time.time()
+        }
+        memories.append(new_memory)
+
+        # 超出限制时，删除最旧的记忆
+        if len(memories) > max_per_group:
+            # 按 updated_at 排序，删除最旧的
+            memories.sort(key=lambda x: x["updated_at"], reverse=True)
+            removed = memories[max_per_group:]
+            data["group_memories"] = memories[:max_per_group]
+            logger.debug(f"[lark_enhance] Removed {len(removed)} old group memories for {group_id}")
+
+        self._save_group_data(group_id)
+        logger.info(f"[lark_enhance] Added group memory for {group_id}: {content[:30]}...")
+        return True
+
+    def get_group_memories(
+        self,
+        group_id: str,
+        limit: int = 10
+    ) -> list[dict]:
+        """获取群级别记忆（按优先级和时间排序）"""
+        data = self._load_group_data(group_id)
+
+        if "group_memories" not in data:
+            return []
+
+        memories = data["group_memories"]
+
+        # 按优先级和更新时间排序
+        sorted_memories = sorted(
+            memories,
+            key=lambda x: (
+                self.TYPE_PRIORITY.get(x["type"], 99),
+                -x["updated_at"]
+            )
+        )
+
+        return sorted_memories[:limit]
+
+    def delete_group_memories(
+        self,
+        group_id: str,
+        target: str = "all"
+    ) -> int:
+        """删除群级别记忆，返回删除数量"""
+        data = self._load_group_data(group_id)
+
+        if "group_memories" not in data:
+            return 0
+
+        memories = data["group_memories"]
+        original_count = len(memories)
+
+        if target == "all":
+            # 一键清除所有群记忆
+            data["group_memories"] = []
+            deleted_count = original_count
+        else:
+            # 匹配删除：检查 content 是否包含 target 关键词
+            target_lower = target.lower()
+            data["group_memories"] = [
+                mem for mem in memories
+                if target_lower not in mem["content"].lower()
+            ]
+            deleted_count = original_count - len(data["group_memories"])
+
+        if deleted_count > 0:
+            self._save_group_data(group_id)
+            logger.info(f"[lark_enhance] Deleted {deleted_count} group memories for {group_id}")
+
+        return deleted_count
+
     def format_memories_for_prompt(self, memories: list[dict]) -> str:
         """格式化记忆列表用于 prompt 注入"""
         if not memories:
@@ -463,6 +572,9 @@ class UserMemoryStore:
 
 
 class Main(star.Star):
+    # 插件版本（用于确认加载的代码版本）
+    _VERSION = "0.3.0"
+
     # 缓存 TTL (秒)
     _CACHE_TTL = 300  # 5 分钟
     # 历史保存防抖间隔 (秒)
@@ -520,8 +632,18 @@ class Main(star.Star):
         _streaming_config = self.config
         _clean_content_func = self._clean_content
 
-        # 设置流式卡片的 monkey patch（当 AstrBot 启用流式输出时自动使用卡片展示）
-        self._setup_streaming_patch()
+        # 设置流式卡片的 monkey patch（仅在配置开启时启用）
+        if self.config.get("enable_streaming_card", False):
+            self._setup_streaming_patch()
+        else:
+            logger.info("[lark_enhance] Streaming card is disabled by config")
+
+        # 插件加载成功日志
+        logger.info(
+            f"[lark_enhance] ====== Plugin loaded successfully ====== "
+            f"Version: {self._VERSION}, "
+            f"UserMemory: {self.config.get('enable_user_memory', True)}"
+        )
 
     def _atexit_save(self):
         """程序退出时保存历史记录"""
@@ -584,6 +706,10 @@ class Main(star.Star):
 
             async def patched_send_streaming(event_self, generator, use_fallback: bool = False):
                 """Monkey-patched send_streaming 方法，使用流式卡片"""
+                # 运行时兜底：配置关闭时走原始实现
+                if not (_streaming_config or {}).get("enable_streaming_card", False):
+                    return await _original_lark_send_streaming(event_self, generator, use_fallback)
+
                 # 检查是否是飞书事件
                 if not hasattr(event_self, "bot") or event_self.bot is None:
                     return await _original_lark_send_streaming(event_self, generator, use_fallback)
@@ -992,11 +1118,95 @@ class Main(star.Star):
 
         return "".join(texts)
 
+    def _extract_image_keys_from_content_json(self, content_json: Any) -> list[str]:
+        """从飞书消息 JSON 中提取 image_key 列表。"""
+        image_keys: list[str] = []
+
+        if isinstance(content_json, dict):
+            image_key = content_json.get("image_key")
+            if isinstance(image_key, str) and image_key:
+                image_keys.append(image_key)
+
+            content = content_json.get("content")
+            if isinstance(content, list):
+                for line in content:
+                    if not isinstance(line, list):
+                        continue
+                    for segment in line:
+                        if not isinstance(segment, dict):
+                            continue
+                        if segment.get("tag") == "img":
+                            key = segment.get("image_key")
+                            if isinstance(key, str) and key:
+                                image_keys.append(key)
+
+        # 去重并保持顺序
+        seen = set()
+        deduped: list[str] = []
+        for key in image_keys:
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(key)
+        return deduped
+
+    async def _download_quoted_images(
+        self,
+        lark_client: Any,
+        message_id: str,
+        image_keys: list[str],
+    ) -> list[str]:
+        """下载引用消息中的图片并返回本地文件路径。"""
+        file_paths: list[str] = []
+        if not image_keys:
+            return file_paths
+
+        im = getattr(lark_client, "im", None)
+        if im is None or im.v1 is None or im.v1.message_resource is None:
+            logger.warning("[lark_enhance] lark_client.im.message_resource 未初始化，无法下载引用图片")
+            return file_paths
+
+        quoted_dir = self._data_dir / "quoted_images"
+        quoted_dir.mkdir(parents=True, exist_ok=True)
+
+        for idx, image_key in enumerate(image_keys):
+            try:
+                request = (
+                    GetMessageResourceRequest.builder()
+                    .message_id(message_id)
+                    .file_key(image_key)
+                    .type("image")
+                    .build()
+                )
+                response = await im.v1.message_resource.aget(request)
+                if not response.success() or response.file is None:
+                    logger.warning(
+                        f"[lark_enhance] Failed to download quoted image: "
+                        f"message_id={message_id}, image_key={image_key}, "
+                        f"code={getattr(response, 'code', 'unknown')}, msg={getattr(response, 'msg', 'unknown')}"
+                    )
+                    continue
+
+                image_bytes = response.file.read()
+                if not image_bytes:
+                    continue
+
+                file_path = quoted_dir / f"{message_id}_{idx}_{uuid.uuid4().hex[:8]}.jpg"
+                file_path.write_bytes(image_bytes)
+                file_paths.append(str(file_path))
+            except Exception as e:
+                logger.error(
+                    f"[lark_enhance] Download quoted image failed: "
+                    f"message_id={message_id}, image_key={image_key}, err={e}"
+                )
+
+        return file_paths
+
     async def _get_message_content(
         self,
         lark_client: Any,
         message_id: str,
-    ) -> tuple[str, str | None] | None:
+    ) -> tuple[str | None, str | None, list[str]] | None:
         """获取消息内容和发送者信息"""
         try:
             request = GetMessageRequest.builder().message_id(message_id).build()
@@ -1025,10 +1235,21 @@ class Main(star.Star):
                                 lark_client, sender_open_id
                             )
 
-                body = getattr(msg_item, "body", None)
-                content = await self._parse_message_body(lark_client, body)
+                # 获取 mentions 信息，用于解析 text 消息中的 @_user_1 占位符
+                mentions = getattr(msg_item, "mentions", None)
 
-                return content, sender_name
+                body = getattr(msg_item, "body", None)
+                content, image_keys = await self._parse_message_body(lark_client, body, mentions)
+                quoted_images = await self._download_quoted_images(
+                    lark_client=lark_client,
+                    message_id=message_id,
+                    image_keys=image_keys,
+                )
+
+                if not content and quoted_images:
+                    content = "（引用消息包含图片）"
+
+                return content, sender_name, quoted_images
             else:
                 logger.warning(
                     f"获取飞书消息内容失败: {response.code} - {response.msg}"
@@ -1038,19 +1259,29 @@ class Main(star.Star):
 
         return None
 
-    async def _parse_message_body(self, lark_client: Any, body: Any) -> str | None:
+    async def _parse_message_body(
+        self, lark_client: Any, body: Any, mentions: Any = None
+    ) -> tuple[str | None, list[str]]:
         """解析 Lark 消息体 content"""
         content = getattr(body, "content", None)
         if not content:
-            return None
+            return None, []
 
         try:
             content_json = json.loads(content)
+            image_keys = self._extract_image_keys_from_content_json(content_json)
 
             # 处理 text 消息
             if "text" in content_json:
                 text_content = content_json["text"]
-                return self._clean_content(text_content)
+                # 使用 mentions 替换 @_user_1 等占位符为真实用户名
+                if mentions:
+                    for mention in mentions:
+                        key = getattr(mention, "key", None)
+                        name = getattr(mention, "name", None)
+                        if key and name:
+                            text_content = text_content.replace(key, f"@{name}")
+                return self._clean_content(text_content), image_keys
 
             # 处理 post 消息
             if "content" in content_json:
@@ -1069,11 +1300,11 @@ class Main(star.Star):
                                 texts.append(f"@{real_name or user_id}")
                             else:
                                 texts.append("@未知用户")
-                return "".join(texts)
+                return "".join(texts), image_keys
 
-            return content
+            return content, image_keys
         except Exception:
-            return content
+            return content, []
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.LARK)
     async def on_message(self, event: AstrMessageEvent):
@@ -1164,12 +1395,15 @@ class Main(star.Star):
                 result = await self._get_message_content(lark_client, parent_id)
 
                 if result:
-                    quoted_content, sender_name = result
+                    quoted_content, sender_name, quoted_images = result
                     logger.debug(
-                        f"[lark_enhance] Fetched quoted content: {quoted_content}, sender: {sender_name}"
+                        f"[lark_enhance] Fetched quoted content: {quoted_content}, "
+                        f"sender: {sender_name}, quoted_images={len(quoted_images)}"
                     )
                     event.set_extra("lark_quoted_content", quoted_content)
                     event.set_extra("lark_quoted_sender", sender_name)
+                    if quoted_images:
+                        event.set_extra("lark_quoted_images", quoted_images)
 
     @filter.after_message_sent()
     async def on_message_sent(self, event: AstrMessageEvent):
@@ -1236,41 +1470,6 @@ class Main(star.Star):
         if not self._is_lark_event(event):
             return
 
-        # 清理 Context 中的 tool_calls
-        if self.config.get("enable_context_cleaner", True) and req.contexts:
-            new_contexts = copy.deepcopy(req.contexts)
-            cleaned_contexts = []
-
-            for ctx in new_contexts:
-                if ctx.get("role") == "assistant" and "tool_calls" in ctx:
-                    logger.debug(
-                        f"[lark_enhance] Cleaning tool_calls from context: {ctx.get('tool_calls')}"
-                    )
-                    ctx.pop("tool_calls", None)
-                    if not ctx.get("content"):
-                        ctx["content"] = "（已执行工具调用）"
-                    cleaned_contexts.append(ctx)
-                elif ctx.get("role") == "tool":
-                    logger.debug(
-                        f"[lark_enhance] Cleaning tool message from context: {ctx}"
-                    )
-                    content = ctx.get("content", "")
-                    if "The tool has no return value" in content:
-                        tool_content = "（已执行动作）"
-                    else:
-                        tool_content = f"（工具执行结果：{content}）"
-
-                    if cleaned_contexts and cleaned_contexts[-1].get("role") == "user":
-                        cleaned_contexts[-1]["content"] = (
-                            cleaned_contexts[-1].get("content", "") + "\n" + tool_content
-                        )
-                    else:
-                        cleaned_contexts.append({"role": "user", "content": tool_content})
-                else:
-                    cleaned_contexts.append(ctx)
-
-            req.contexts = cleaned_contexts
-
         prompts_to_inject = []
 
         # 0. 输出格式约束（防止 LLM 输出序列化格式）
@@ -1284,9 +1483,12 @@ class Main(star.Star):
         if self.config.get("enable_user_memory", True):
             prompts_to_inject.append(
                 "[记忆功能]\n"
-                "你具有记忆用户信息的能力。当用户要求你记住某些信息（如称呼、职业、偏好等）时，"
-                "请使用 lark_save_memory 工具保存。当用户询问你记得什么时，使用 lark_list_memory 工具查询。"
-                "当用户要求忘记信息时，使用 lark_forget_memory 工具删除。"
+                "你具有记忆信息的能力，支持两种范围：\n"
+                "- scope=\"user\"（默认）：个人记忆，仅对当前用户生效。用于记住用户个人信息（称呼、偏好、职业等）。\n"
+                "- scope=\"group\"：群记忆，对群内所有人生效。用于记住群相关信息（群规、项目背景、约定、群内通用知识等）。\n"
+                "当用户要求记住信息时，根据信息性质选择合适的 scope 调用 lark_save_memory 工具。"
+                "当用户询问记忆时，使用 lark_list_memory 工具（支持 scope=\"all\" 同时查看）。"
+                "当用户要求忘记信息时，使用 lark_forget_memory 工具。"
             )
 
         # 1. 注入群组信息
@@ -1303,19 +1505,42 @@ class Main(star.Star):
                         f"[当前群组信息]\n" + "\n".join(info_parts)
                     )
 
-        # 2. 注入引用消息
+        # 2. 注入引用消息（注入到 prompt 上下文而非 system prompt）
         if self.config.get("enable_quoted_content", True):
             quoted_content = event.get_extra("lark_quoted_content")
             quoted_sender = event.get_extra("lark_quoted_sender")
+            quoted_images = event.get_extra("lark_quoted_images") or []
+            quoted_image_count = len(quoted_images) if isinstance(quoted_images, list) else 0
 
-            if quoted_content:
-                logger.debug("[lark_enhance] Injecting quoted content into LLM prompt.")
+            if quoted_content or quoted_image_count > 0:
+                logger.debug("[lark_enhance] Injecting quoted content into user prompt context.")
                 if quoted_sender:
-                    prompts_to_inject.append(
-                        f"「{quoted_sender}」在回复的消息中说道：\n{quoted_content}\n"
-                    )
+                    header = f"（用户回复了「{quoted_sender}」的消息"
                 else:
-                    prompts_to_inject.append(f"[引用消息]\n{quoted_content}\n")
+                    header = "（用户回复了一条消息"
+
+                if quoted_content and quoted_image_count > 0:
+                    quoted_prefix = (
+                        f"{header}（其中包含 {quoted_image_count} 张图片）：\n"
+                        f"{quoted_content}\n）\n\n"
+                    )
+                elif quoted_content:
+                    quoted_prefix = f"{header}：\n{quoted_content}\n）\n\n"
+                else:
+                    quoted_prefix = (
+                        f"{header}（其中包含 {quoted_image_count} 张图片）。\n"
+                        "请结合附带图片理解用户当前问题。\n）\n\n"
+                    )
+                req.prompt = quoted_prefix + (req.prompt or "")
+
+            # 将引用图片注入请求，让 AstrBot 当前多模态模型直接理解图片内容
+            if quoted_image_count > 0:
+                if req.image_urls is None:
+                    req.image_urls = []
+                req.image_urls.extend(quoted_images)
+                logger.debug(
+                    f"[lark_enhance] Injected {quoted_image_count} quoted image(s) into req.image_urls"
+                )
 
         # 3. 注入群聊历史
         history_count = self.config.get("history_inject_count", 0)
@@ -1351,6 +1576,13 @@ class Main(star.Star):
                         f"[关于当前用户「{sender_name}」的记忆]\n{memory_str}"
                     )
                     logger.debug(f"[lark_enhance] Injected {len(memories)} memories for user {sender_id}")
+
+            # 5. 注入群记忆（对群内所有人生效）
+            group_memories = self._memory_store.get_group_memories(group_id, limit=inject_limit)
+            if group_memories:
+                group_memory_str = self._memory_store.format_memories_for_prompt(group_memories)
+                prompts_to_inject.append(f"[关于当前群的记忆]\n{group_memory_str}")
+                logger.debug(f"[lark_enhance] Injected {len(group_memories)} group memories for {group_id}")
 
         if prompts_to_inject:
             final_inject = (
@@ -1448,18 +1680,22 @@ class Main(star.Star):
         self,
         event: AstrMessageEvent,
         memory_type: str,
-        content: str
+        content: str,
+        scope: str = "user"
     ):
-        """保存当前群内用户的记忆。当用户明确要求记住某些信息时使用此工具。
+        """保存记忆。当用户明确要求记住某些信息时使用此工具。
 
-        记忆仅在当前群生效，不会影响用户在其他群的交互。
+        记忆仅在当前群生效，不会影响其他群的交互。
 
         Args:
             memory_type(string): 记忆类型，必须是以下之一：
-                - preference: 用户偏好（如称呼、回复风格、语言偏好）
-                - fact: 用户事实（如职业、负责的项目、技能特长）
+                - preference: 偏好（如称呼、回复风格、语言偏好）
+                - fact: 事实（如职业、负责的项目、技能特长、群的用途）
                 - instruction: 持久指令（如"总是用英文回复"、"不要用表情"）
-            content(string): 要记住的内容，用简洁的陈述句描述（如"希望被称呼为小王"、"是后端开发工程师"）
+            content(string): 要记住的内容，用简洁的陈述句描述（如"希望被称呼为小王"、"是后端开发工程师"、"这个群是讨论 X 项目的"）
+            scope(string): 记忆范围，必须是以下之一：
+                - user（默认）: 个人记忆，仅对当前用户生效。用于用户个人信息（称呼、偏好、职业等）。
+                - group: 群记忆，对群内所有人生效。用于群相关信息（群规、项目背景、约定、群内通用知识等）。
         """
         if not self._is_lark_event(event):
             return "不是飞书平台，无法使用记忆功能。"
@@ -1470,35 +1706,57 @@ class Main(star.Star):
         group_id = event.message_obj.group_id
         if not group_id:
             return "记忆功能仅在群聊中可用。"
-
-        sender_id = event.get_sender_id()
-        if not sender_id:
-            return "无法获取用户信息。"
 
         # 验证记忆类型
         valid_types = {"preference", "fact", "instruction"}
         if memory_type not in valid_types:
             return f"无效的记忆类型。请使用: {', '.join(valid_types)}"
 
-        max_per_user = self.config.get("memory_max_per_user", 20)
-        success = self._memory_store.add_memory(
-            group_id=group_id,
-            user_id=sender_id,
-            memory_type=memory_type,
-            content=content,
-            max_per_user=max_per_user
-        )
+        # 验证范围
+        valid_scopes = {"user", "group"}
+        if scope not in valid_scopes:
+            return f"无效的记忆范围。请使用: {', '.join(valid_scopes)}"
+
+        if scope == "group":
+            # 群级别记忆
+            max_per_group = self.config.get("memory_max_per_group", 30)
+            success = self._memory_store.add_group_memory(
+                group_id=group_id,
+                memory_type=memory_type,
+                content=content,
+                max_per_group=max_per_group
+            )
+            scope_desc = "群记忆"
+        else:
+            # 用户级别记忆
+            sender_id = event.get_sender_id()
+            if not sender_id:
+                return "无法获取用户信息。"
+
+            max_per_user = self.config.get("memory_max_per_user", 20)
+            success = self._memory_store.add_memory(
+                group_id=group_id,
+                user_id=sender_id,
+                memory_type=memory_type,
+                content=content,
+                max_per_user=max_per_user
+            )
+            scope_desc = "个人记忆"
 
         if success:
-            return f"好的，我记住了：{content}"
+            return f"好的，我记住了（{scope_desc}）：{content}"
         else:
             return "保存记忆失败，请稍后重试。"
 
     @filter.llm_tool(name="lark_list_memory")
-    async def lark_list_memory(self, event: AstrMessageEvent):
-        """查询用户在当前群的所有记忆。当用户询问"你记得我什么"、"你对我有什么印象"时使用此工具。
+    async def lark_list_memory(self, event: AstrMessageEvent, scope: str = "user"):
+        """查询当前群的记忆。当用户询问"你记得我什么"、"你对我有什么印象"、"这个群有什么记忆"时使用此工具。
 
-        返回该用户在当前群的所有记忆列表。
+        Args:
+            scope(string): 查询范围，必须是以下之一：
+                - user（默认）: 仅查询当前用户的个人记忆
+                - group: 仅查询群记忆
+                - all: 同时查询个人记忆和群记忆
         """
         if not self._is_lark_event(event):
             return "不是飞书平台，无法使用记忆功能。"
@@ -1510,26 +1768,50 @@ class Main(star.Star):
         if not group_id:
             return "记忆功能仅在群聊中可用。"
 
-        sender_id = event.get_sender_id()
-        if not sender_id:
-            return "无法获取用户信息。"
+        # 验证范围
+        valid_scopes = {"user", "group", "all"}
+        if scope not in valid_scopes:
+            return f"无效的查询范围。请使用: {', '.join(valid_scopes)}"
 
-        memories = self._memory_store.get_memories(group_id, sender_id, limit=50)
+        results = []
 
-        if not memories:
-            return "我还没有记住关于你的任何信息。"
+        # 查询用户记忆
+        if scope in ("user", "all"):
+            sender_id = event.get_sender_id()
+            if sender_id:
+                user_memories = self._memory_store.get_memories(group_id, sender_id, limit=50)
+                if user_memories:
+                    user_memory_str = self._memory_store.format_memories_for_prompt(user_memories)
+                    results.append(f"【个人记忆】\n{user_memory_str}")
 
-        memory_str = self._memory_store.format_memories_for_prompt(memories)
-        return f"在这个群里，我记得关于你的以下信息：\n{memory_str}"
+        # 查询群记忆
+        if scope in ("group", "all"):
+            group_memories = self._memory_store.get_group_memories(group_id, limit=50)
+            if group_memories:
+                group_memory_str = self._memory_store.format_memories_for_prompt(group_memories)
+                results.append(f"【群记忆】\n{group_memory_str}")
+
+        if not results:
+            if scope == "user":
+                return "我还没有记住关于你的任何个人信息。"
+            elif scope == "group":
+                return "这个群还没有任何群记忆。"
+            else:
+                return "我还没有记住任何信息（包括个人记忆和群记忆）。"
+
+        return "在这个群里，我记得以下信息：\n\n" + "\n\n".join(results)
 
     @filter.llm_tool(name="lark_forget_memory")
-    async def lark_forget_memory(self, event: AstrMessageEvent, target: str = "all"):
-        """删除用户在当前群的记忆。当用户要求忘记某些信息或清除所有记忆时使用此工具。
+    async def lark_forget_memory(self, event: AstrMessageEvent, target: str = "all", scope: str = "user"):
+        """删除当前群的记忆。当用户要求忘记某些信息或清除所有记忆时使用此工具。
 
         Args:
             target(string): 删除目标
                 - "all": 一键清除所有记忆
                 - 具体关键词: 删除包含该关键词的记忆（如"称呼"、"职业"、"英文"）
+            scope(string): 删除范围，必须是以下之一：
+                - user（默认）: 仅删除当前用户的个人记忆
+                - group: 仅删除群记忆
         """
         if not self._is_lark_event(event):
             return "不是飞书平台，无法使用记忆功能。"
@@ -1541,22 +1823,33 @@ class Main(star.Star):
         if not group_id:
             return "记忆功能仅在群聊中可用。"
 
-        sender_id = event.get_sender_id()
-        if not sender_id:
-            return "无法获取用户信息。"
+        # 验证范围
+        valid_scopes = {"user", "group"}
+        if scope not in valid_scopes:
+            return f"无效的删除范围。请使用: {', '.join(valid_scopes)}"
 
-        deleted_count = self._memory_store.delete_memories(group_id, sender_id, target)
+        if scope == "group":
+            # 删除群记忆
+            deleted_count = self._memory_store.delete_group_memories(group_id, target)
+            scope_desc = "群记忆"
+        else:
+            # 删除用户记忆
+            sender_id = event.get_sender_id()
+            if not sender_id:
+                return "无法获取用户信息。"
+            deleted_count = self._memory_store.delete_memories(group_id, sender_id, target)
+            scope_desc = "个人记忆"
 
         if deleted_count == 0:
             if target == "all":
-                return "没有找到任何记忆需要删除。"
+                return f"没有找到任何{scope_desc}需要删除。"
             else:
-                return f"没有找到包含「{target}」的记忆。"
+                return f"没有找到包含「{target}」的{scope_desc}。"
 
         if target == "all":
-            return f"好的，我已经清除了在这个群里关于你的所有记忆（共 {deleted_count} 条）。"
+            return f"好的，我已经清除了所有{scope_desc}（共 {deleted_count} 条）。"
         else:
-            return f"好的，我已经删除了包含「{target}」的记忆（共 {deleted_count} 条）。"
+            return f"好的，我已经删除了包含「{target}」的{scope_desc}（共 {deleted_count} 条）。"
 
     # 预编译的正则：清理 @ 周围的 Markdown 格式
     # 匹配 **@xxx**、*@xxx*、__@xxx__、_@xxx_ 等模式，包括中间可能有的换行
