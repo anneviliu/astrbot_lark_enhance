@@ -19,6 +19,21 @@
         "type": "bool",
         "default": false
     },
+    "enable_vibe_sense": {
+        "description": "是否启用群聊氛围感知（根据近期聊天内容自动调整回复语气）",
+        "type": "bool",
+        "default": true
+    },
+    "enable_meme_memory": {
+        "description": "是否启用群梗记忆（记录并注入群内常用梗）",
+        "type": "bool",
+        "default": true
+    },
+    "enable_human_rhythm": {
+        "description": "是否启用拟人节奏控制（短句、口语化、节奏变化）",
+        "type": "bool",
+        "default": true
+    },
     "history_inject_count": {
         "description": "本地记录群聊历史消息的数量（0 表示禁用）。启用后，插件将自动记录群组最近的 N 条消息，并在对话时提供给 LLM 作为背景上下文。",
         "type": "int",
