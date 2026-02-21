@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **主入口瘦身**：`main.py` 从“大一统实现”调整为“装配 + 装饰器入口转调”模式，降低耦合，保留 AstrBot 插件加载兼容性。
 - **工具参数文档补齐**：在 `lark_emoji_reply` / `lark_save_memory` / `lark_list_memory` / `lark_forget_memory` 中补全 `Args` 注释，确保框架可正确解析工具参数 schema。
+- **表情工具文档增强**：`lark_emoji_reply` 工具说明补充飞书官方 `emoji_type` 枚举列表（117 项）与官方文档链接。
 - **版本号升级**：插件版本更新至 `0.3.1`。
 
 ### Fixed
@@ -21,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **事件钩子绑定异常**：修复 `on_message_sent` / `on_llm_request` / `on_decorating_result` 出现 `missing positional argument` 的绑定错误。
 - **mention 正则缓存报错**：修复 `NameError: name 'time' is not defined`。
 - **工具调用参数丢失**：修复 `lark_emoji_reply` 在工具执行阶段出现 `emoji` 参数被忽略和参数不匹配的问题。
+- **表情代码兼容性**：`lark_emoji_reply` 新增表情代码标准化与候选重试（如 `THUMBS_UP -> THUMBSUP`），降低 `231001 reaction type is invalid` 失败率。
+- **记忆注入边界变量**：修复 `on_llm_request` 中 `inject_limit` 在特定分支下未初始化的问题。
+- **群梗自动捕获回归**：恢复 `history` 模块中“记住这个梗”自动沉淀逻辑，避免重构后失效。
 
 ## [0.3.0] - 2026-02-06
 

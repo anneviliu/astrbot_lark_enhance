@@ -102,8 +102,23 @@ class Main(HistoryMixin, LarkContextMixin, TextMixin, StreamingMixin, star.Star)
     async def lark_emoji_reply(self, event: AstrMessageEvent, emoji: str):
         """飞书表情回复工具。
 
+        官方 emoji_type 枚举（飞书文档，117 个）：
+            OK, THUMBSUP, THANKS, MUSCLE, FINGERHEART, APPLAUSE, FISTBUMP, JIAYI, DONE, SMILE
+            BLUSH, LAUGH, SMIRK, LOL, FACEPALM, LOVE, WINK, PROUD, WITTY, SMART
+            SCOWL, THINKING, SOB, CRY, ERROR, NOSEPICK, HAUGHTY, SLAP, SPITBLOOD, TOASTED
+            GLANCE, DULL, INNOCENTSMILE, JOYFUL, WOW, TRICK, YEAH, ENOUGH, TEARS, EMBARRASSED
+            KISS, SMOOCH, DROOL, OBSESSED, MONEY, TEASE, SHOWOFF, COMFORT, CLAP, PRAISE
+            STRIVE, XBLUSH, SILENT, WAVE, WHAT, FROWN, SHY, DIZZY, LOOKDOWN, CHUCKLE
+            WAIL, CRAZY, WHIMPER, HUG, BLUBBER, WRONGED, HUSKY, SHHH, SMUG, ANGRY
+            HAMMER, SHOCKED, TERROR, PETRIFIED, SKULL, SWEAT, SPEECHLESS, SLEEP, DROWSY, YAWN
+            SICK, PUKE, BETRAYED, HEADSET, LGTM, SALUTE, SHAKE, HIGHFIVE, UPPERLEFT, SLIGHT
+            TONGUE, EYESCLOSED, CALF, BEAR, BULL, RAINBOWPUKE, ROSE, HEART, PARTY, LIPS
+            BEER, CAKE, GIFT, CUCUMBER, CANDIEDHAWS, OKR, AWESOMEN, BOMB, FIREWORKS, REDPACKET
+            FORTUNE, LUCK, FIRECRACKER, HEARTBROKEN, POOP, CLEAVER, TV
+        文档：https://open.feishu.cn/document/server-docs/im-v1/message-reaction/emojis-introduce
+
         Args:
-            emoji(string): 表情代码。请使用飞书支持的全大写英文代码。
+            emoji(string): 表情代码。请尽量使用上述枚举值（全大写）。插件会自动兼容部分别名，如 THUMBS_UP -> THUMBSUP。
         """
         return await handle_lark_emoji_reply(self, event, emoji)
 

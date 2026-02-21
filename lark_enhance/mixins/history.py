@@ -58,6 +58,36 @@ class HistoryMixin:
         if not self.config.get("enable_meme_memory", True):
             return
 
+        if not group_id or not content:
+            return
+
+        text = content.strip()
+        if not text or text.startswith("/"):
+            return
+
+        for pattern in self._MEME_CAPTURE_PATTERNS:
+            match = pattern.match(text)
+            if not match:
+                continue
+
+            meme_content = (match.group(1) or "").strip()
+            if not meme_content or len(meme_content) > 120:
+                return
+
+            max_memes = self.config.get("memory_max_per_group", 30)
+            saved = self._memory_store.add_group_memory(
+                group_id=group_id,
+                memory_type="meme",
+                content=meme_content,
+                max_per_group=max_memes,
+            )
+            if saved:
+                logger.info(
+                    f"[lark_enhance] Captured group meme for {group_id} "
+                    f"by {sender_name}: {meme_content[:50]}..."
+                )
+            return
+
     def _format_history_sender(self, item: dict) -> str:
         """格式化历史记录中的发送者标识：昵称(open_id后4位)。"""
         sender_name = item.get("sender", "未知用户")

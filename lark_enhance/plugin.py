@@ -388,9 +388,9 @@ class Main(HistoryMixin, LarkContextMixin, TextMixin, StreamingMixin, star.Star)
 
         # 4. 注入用户记忆
         if self.config.get("enable_user_memory", True) and group_id:
+            inject_limit = self.config.get("memory_inject_limit", 10)
             sender_id = event.get_sender_id()
             if sender_id:
-                inject_limit = self.config.get("memory_inject_limit", 10)
                 memories = self._memory_store.get_memories(group_id, sender_id, limit=inject_limit)
                 if memories:
                     memory_str = self._memory_store.format_memories_for_prompt(memories)

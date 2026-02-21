@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from astrbot.api import logger
@@ -10,6 +11,56 @@ from lark_oapi.api.im.v1 import (
     CreateMessageReactionRequestBody,
 )
 from lark_oapi.api.im.v1.model import Emoji
+
+
+_EMOJI_ALIASES = {
+    "THUMBSUP": "THUMBSUP",
+    "THUMBSUPS": "THUMBSUP",
+    "THUMBSDOWN": "THUMBSDOWN",
+    "PLUSONE": "JIAYI",
+    "PLUS1": "JIAYI",
+    "JIAYI": "JIAYI",
+}
+
+
+def _normalize_emoji_code(raw_emoji: str) -> str:
+    """Normalize common emoji code variants to Feishu accepted format."""
+    code = (raw_emoji or "").strip().upper()
+    if not code:
+        return code
+
+    if code in _EMOJI_ALIASES:
+        return _EMOJI_ALIASES[code]
+
+    compact = re.sub(r"[^A-Z0-9]+", "", code)
+    if compact in _EMOJI_ALIASES:
+        return _EMOJI_ALIASES[compact]
+
+    return compact
+
+
+def _emoji_candidates(raw_emoji: str) -> list[str]:
+    """Build candidate emoji codes for tolerant reaction creation."""
+    raw = (raw_emoji or "").strip()
+    if not raw:
+        return []
+
+    normalized = _normalize_emoji_code(raw)
+    upper = raw.upper()
+    compact = re.sub(r"[^A-Z0-9]+", "", upper)
+
+    candidates: list[str] = []
+    for candidate in (
+        normalized,
+        compact,
+        upper,
+        raw,
+        normalized.lower() if normalized else "",
+        compact.lower() if compact else "",
+    ):
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
 
 
 async def handle_lark_emoji_reply(plugin: Any, event: AstrMessageEvent, emoji: str):
@@ -28,18 +79,16 @@ async def handle_lark_emoji_reply(plugin: Any, event: AstrMessageEvent, emoji: s
         logger.warning("[lark_enhance] lark_client is None, cannot add emoji reaction")
         return "无法获取飞书客户端，添加表情失败。"
 
-    try:
-        request = (
-            CreateMessageReactionRequest.builder()
-            .message_id(message_id)
-            .request_body(
-                CreateMessageReactionRequestBody.builder()
-                .reaction_type(Emoji.builder().emoji_type(emoji).build())
-                .build()
-            )
-            .build()
+    candidates = _emoji_candidates(emoji)
+    if not candidates:
+        return "表情代码为空，添加表情失败。"
+    normalized_emoji = candidates[0]
+    if normalized_emoji != emoji:
+        logger.debug(
+            f"[lark_enhance] Normalize emoji code: {emoji} -> {normalized_emoji}"
         )
 
+    try:
         im = getattr(lark_client, "im", None)
         if im is None or im.v1 is None or im.v1.message_reaction is None:
             logger.warning(
@@ -47,21 +96,59 @@ async def handle_lark_emoji_reply(plugin: Any, event: AstrMessageEvent, emoji: s
             )
             return "飞书客户端未正确初始化，添加表情失败。"
 
-        response = await im.v1.message_reaction.acreate(request)
+        last_response = None
+        for candidate in candidates:
+            request = (
+                CreateMessageReactionRequest.builder()
+                .message_id(message_id)
+                .request_body(
+                    CreateMessageReactionRequestBody.builder()
+                    .reaction_type(Emoji.builder().emoji_type(candidate).build())
+                    .build()
+                )
+                .build()
+            )
 
-        if response.success():
-            plugin._reacted_messages[message_id] = True
+            response = await im.v1.message_reaction.acreate(request)
+            last_response = response
 
-            while len(plugin._reacted_messages) > 1000:
-                plugin._reacted_messages.popitem(last=False)
+            if response.success():
+                plugin._reacted_messages[message_id] = True
 
-            logger.info(f"[lark_enhance] Reacted with {emoji} to message {message_id}")
-            return None
+                while len(plugin._reacted_messages) > 1000:
+                    plugin._reacted_messages.popitem(last=False)
 
-        logger.error(
-            f"[lark_enhance] React failed: {response.code} - {response.msg}"
-        )
-        return f"添加 {emoji} 表情失败: {response.msg}"
+                if candidate != emoji:
+                    logger.info(
+                        f"[lark_enhance] Reacted with fallback emoji {candidate} "
+                        f"(original {emoji}) to message {message_id}"
+                    )
+                else:
+                    logger.info(
+                        f"[lark_enhance] Reacted with {candidate} to message {message_id}"
+                    )
+                return None
+
+            if response.code != 231001:
+                logger.error(
+                    f"[lark_enhance] React failed: {response.code} - {response.msg}"
+                )
+                return f"添加 {emoji} 表情失败: {response.msg}"
+
+            logger.warning(
+                f"[lark_enhance] Emoji candidate invalid: {candidate}, try next"
+            )
+
+        if last_response is not None:
+            logger.error(
+                f"[lark_enhance] React failed after candidates {candidates}: "
+                f"{last_response.code} - {last_response.msg}"
+            )
+            return (
+                f"添加 {emoji} 表情失败: {last_response.msg}。"
+                f"尝试过: {', '.join(candidates)}。"
+            )
+        return f"添加 {emoji} 表情失败"
 
     except Exception as e:
         logger.error(f"[lark_enhance] React failed: {e}")
