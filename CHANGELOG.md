@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-02-21
+
+### Added
+- **模块化目录结构**：新增 `lark_enhance/handlers`、`lark_enhance/mixins`、`lark_enhance/stores`、`lark_enhance/services`，将核心能力按职责拆分。
+- **事件与工具处理器拆分**：新增 `lark_enhance/handlers/events.py` 与 `lark_enhance/handlers/tools.py`，承载主要业务逻辑。
+
+### Changed
+- **主入口瘦身**：`main.py` 从“大一统实现”调整为“装配 + 装饰器入口转调”模式，降低耦合，保留 AstrBot 插件加载兼容性。
+- **工具参数文档补齐**：在 `lark_emoji_reply` / `lark_save_memory` / `lark_list_memory` / `lark_forget_memory` 中补全 `Args` 注释，确保框架可正确解析工具参数 schema。
+- **版本号升级**：插件版本更新至 `0.3.1`。
+
+### Fixed
+- **插件导入路径兼容**：修复重载时 `No module named 'lark_enhance'` 的导入失败问题。
+- **事件钩子绑定异常**：修复 `on_message_sent` / `on_llm_request` / `on_decorating_result` 出现 `missing positional argument` 的绑定错误。
+- **mention 正则缓存报错**：修复 `NameError: name 'time' is not defined`。
+- **工具调用参数丢失**：修复 `lark_emoji_reply` 在工具执行阶段出现 `emoji` 参数被忽略和参数不匹配的问题。
+
 ## [0.3.0] - 2026-02-06
 
 ### Added
