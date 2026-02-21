@@ -304,6 +304,14 @@ async def handle_on_llm_request(plugin: Any, event: AstrMessageEvent, req: Provi
             "- 尽量像群友接话，不要像客服模板。"
         )
 
+    prompts_to_inject.append(
+        "[飞书表情工具调用策略]\n"
+        "- 当你有强烈情绪表达需求时（例如强烈点赞、祝贺、惊讶、安慰、无语、收到），优先调用 lark_emoji_reply。\n"
+        "- 特别是只需表达态度、不需要展开解释时，优先使用表情工具而不是长文本。\n"
+        "- 不要每条消息都调用；仅在情绪明显、表情能提升表达效果时调用。\n"
+        "- emoji 参数需使用飞书 emoji_type（如 THUMBSUP、JIAYI、APPLAUSE、SMILE、WOW、HEART、SOB、FACEPALM、LGTM、SALUTE）。"
+    )
+
     if plugin.config.get("enable_meme_memory", True) and group_id:
         meme_limit = plugin.config.get("memory_inject_limit", 10)
         memes = plugin._memory_store.get_group_memories(

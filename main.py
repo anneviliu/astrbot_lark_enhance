@@ -101,6 +101,8 @@ class Main(HistoryMixin, LarkContextMixin, TextMixin, StreamingMixin, star.Star)
     @filter.llm_tool(name="lark_emoji_reply")
     async def lark_emoji_reply(self, event: AstrMessageEvent, emoji: str):
         """飞书表情回复工具。
+        当需要强烈表达情绪（点赞、祝贺、惊讶、安慰、无语、收到）且不需要长文本时，优先调用本工具。
+        该工具用于“情绪表达增强”，不要机械地每条都用。
 
         官方 emoji_type 枚举（飞书文档，117 个）：
             OK, THUMBSUP, THANKS, MUSCLE, FINGERHEART, APPLAUSE, FISTBUMP, JIAYI, DONE, SMILE
