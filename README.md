@@ -47,6 +47,17 @@
 - **情感表达**：模型可以使用工具给用户的消息贴上 👍、❤️、😂 等表情。
 - **防刷屏**：每条消息最多只能添加一个表情回复。
 
+### 8. 🌡️ 群聊氛围感知
+机器人会基于最近群聊内容判断当前氛围（如欢乐整活、轻求助、日常聊天），自动调整回复语气和结构。
+
+### 9. 🧩 群梗记忆
+支持记录和注入群内常用梗，减少“机器人味”。
+- 自动识别“记住这个梗：xxx”类消息并存储。
+- 复用记忆工具：`lark_save_memory` / `lark_list_memory` / `lark_forget_memory`（通过 `memory_type="meme"` 管理群梗）。
+
+### 10. 🗣️ 拟人节奏控制
+通过系统提示约束回复节奏：优先短句、先接话再回答、句式多样，避免模板化客服口吻。
+
 ## ⚙️ 配置说明
 
 插件支持通过 AstrBot 仪表盘或直接修改配置文件进行配置。
@@ -57,11 +68,15 @@
 | `enable_quoted_content` | bool | `true` | 是否启用引用消息内容注入 |
 | `enable_group_info` | bool | `true` | 是否注入群组信息（群名、群描述） |
 | `enable_streaming_card` | bool | `false` | 是否启用流式卡片输出（打字机效果，需要同时开启 AstrBot 流式输出） |
+| `enable_vibe_sense` | bool | `true` | 是否启用群聊氛围感知 |
+| `enable_meme_memory` | bool | `true` | 是否启用群梗记忆 |
+| `enable_human_rhythm` | bool | `true` | 是否启用拟人节奏控制 |
 | `enable_mention_convert` | bool | `true` | 是否将 LLM 回复中的 @名字 转换为飞书 @ 提及 |
 | `enable_user_memory` | bool | `true` | 是否启用用户记忆功能 |
 | `history_inject_count` | int | `20` | 群聊历史记录数量，设置为 0 可禁用 |
 | `memory_inject_limit` | int | `10` | 每次注入的用户记忆数量上限 |
 | `memory_max_per_user` | int | `20` | 每个用户的最大记忆条数 |
+| `memory_max_per_group` | int | `30` | 每个群的群维度记忆条数上限 |
 | `bot_name` | string | `"助手"` | 机器人在群聊历史记录中显示的名称 |
 
 ## 🚀 安装与使用

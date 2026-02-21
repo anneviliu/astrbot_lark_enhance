@@ -9,6 +9,9 @@
 - 引用消息内容回填到当前对话。
 - 群聊历史持久化与注入。
 - 群信息（名称/描述）注入。
+- 群聊氛围感知（根据近期聊天自动调节语气）。
+- 群梗记忆（自动捕获 + 工具读写 + prompt 注入）。
+- 拟人节奏控制（短句、口语化、节奏变化）。
 - `@名字` 自动转换为飞书 `At` 组件。
 - 流式卡片打字机输出（Patch API）。
 - 用户记忆（群维度 + 用户维度）存储与注入。
@@ -43,6 +46,7 @@
 - 清理消息内容中的序列化噪声。
 - 处理引用消息，拉取被引用内容与发送者。
 - 若引用消息含图片，下载后作为多模态输入素材。
+- 自动捕获“记住这个梗”类消息，沉淀群梗记忆。
 - 记录群聊历史（滑动窗口 + 持久化）。
 - 拉取并缓存群信息。
 
@@ -52,6 +56,7 @@
 - 注入群信息、引用消息、历史消息。
 - 将引用图片注入 `req.image_urls` 供当前多模态模型理解。
 - 注入用户记忆（开启时）。
+- 注入群梗记忆、群聊氛围和拟人节奏提示。
 
 ### 4.3 `on_decorating_result`
 
@@ -97,6 +102,9 @@
 | `enable_quoted_content` | bool | `true` | 启用引用消息增强 |
 | `enable_group_info` | bool | `true` | 注入群名称/描述到上下文 |
 | `enable_streaming_card` | bool | `false` | 启用流式卡片输出（需同时开启 AstrBot 流式输出） |
+| `enable_vibe_sense` | bool | `true` | 启用群聊氛围感知 |
+| `enable_meme_memory` | bool | `true` | 启用群梗记忆 |
+| `enable_human_rhythm` | bool | `true` | 启用拟人节奏控制 |
 | `history_inject_count` | int | `20` | 历史记录与注入条数，`0` 表示禁用 |
 | `bot_name` | string | `"助手"` | 机器人在历史中的显示名 |
 | `enable_mention_convert` | bool | `true` | 启用 `@名字` 转飞书 mention |
