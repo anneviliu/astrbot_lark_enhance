@@ -21,14 +21,14 @@ from lark_oapi.api.im.v1 import (
 )
 from lark_oapi.api.im.v1.model import Emoji
 
-from .lark_enhance.mixins import (
+from .mixins import (
     HistoryMixin,
     LarkContextMixin,
     StreamingMixin,
     TextMixin,
     configure_streaming_runtime,
 )
-from .lark_enhance.stores import UserMemoryStore
+from .stores import UserMemoryStore
 
 
 class Main(HistoryMixin, LarkContextMixin, TextMixin, StreamingMixin, star.Star):
