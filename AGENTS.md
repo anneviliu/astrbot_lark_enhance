@@ -90,9 +90,13 @@
 
 当 `enable_user_memory=true`：
 - 记录用户偏好/事实/指令等记忆。
-- 按群和用户维度管理。
+- 个人记忆作用域由 `memory_scope` 控制：
+  - `group`（默认）：按群隔离，同一用户在不同群的记忆独立（原行为）。
+  - `user`：按用户隔离，以用户 open_id 为 key，跨群共享且私聊场景也生效。
+- 群维度记忆（group_memories）始终按群隔离，仅群聊注入。
 - 受 `memory_max_per_user`、`memory_max_per_group` 限制。
 - 每次请求按 `memory_inject_limit` 注入到 LLM 请求上下文。
+- 切换 `memory_scope` 到 `user` 后可用 `tools/migrate_memory_scope.py` 迁移旧数据。
 
 ## 8. 配置项（与 `_conf_schema.json` 对齐）
 
@@ -110,6 +114,7 @@
 | `enable_mention_convert` | bool | `true` | 启用 `@名字` 转飞书 mention |
 | `enable_user_memory` | bool | `true` | 启用用户记忆 |
 | `memory_max_per_user` | int | `20` | 每用户每群最大记忆条数 |
+| `memory_scope` | string | `"group"` | 个人记忆作用域：`group`=按群隔离（默认）；`user`=按用户隔离（跨群+私聊） |
 | `memory_max_per_group` | int | `30` | 每群最大群维度记忆条数 |
 | `memory_inject_limit` | int | `10` | 每次请求最大注入记忆条数 |
 
@@ -129,6 +134,8 @@
 3. 引用增强：回复他人消息时，模型能理解被引用内容。
 4. 历史注入：连续对话后可引用近期上下文。
 5. 记忆注入：多轮后能记住用户偏好并复用。
+9. 记忆私聊（user 模式）：私聊场景能读取个人记忆。
+10. 记忆跨群（user 模式）：同一用户在 A 群存的偏好，B 群/私聊也能读到。
 6. 反应工具：`lark_emoji_reply` 生效且不会重复刷反应。
 7. 流式卡片：开启后可稳定增量刷新并最终收敛。
 8. `/reset`：仅清理当前群历史。

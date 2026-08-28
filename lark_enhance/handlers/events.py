@@ -276,24 +276,42 @@ async def handle_on_llm_request(plugin: Any, event: AstrMessageEvent, req: Provi
                     f"\n[当前群聊最近 {len(recent_history)} 条消息记录（仅供参考，不包含当前消息）]\n{history_str}\n"
                 )
 
-    if plugin.config.get("enable_user_memory", True) and group_id:
+    if plugin.config.get("enable_user_memory", True):
         inject_limit = plugin.config.get("memory_inject_limit", 10)
         sender_id = event.get_sender_id()
-        if sender_id:
-            memories = plugin._memory_store.get_memories(group_id, sender_id, limit=inject_limit)
+        memory_scope = plugin.config.get("memory_scope", "group")
+
+        # 个人记忆：按 memory_scope 决定作用域 key
+        #   - "user": 以用户 open_id 为 key，跨群共享且私聊生效
+        #   - "group": 以群 id 为 key，按群隔离（原行为）
+        personal_memory_key = sender_id if memory_scope == "user" else group_id
+        if personal_memory_key and sender_id:
+            memories = plugin._memory_store.get_memories(
+                personal_memory_key, sender_id, limit=inject_limit
+            )
+            if not memories and group_id and personal_memory_key != group_id:
+                # 兼容旧数据：user 模式下 fallback 到群文件读取旧记忆
+                memories = plugin._memory_store.get_memories(
+                    group_id, sender_id, limit=inject_limit
+                )
             if memories:
                 memory_str = plugin._memory_store.format_memories_for_prompt(memories)
                 sender_name = event.message_obj.sender.nickname or sender_id
                 prompts_to_inject.append(
                     f"[关于当前用户「{sender_name}」的记忆]\n{memory_str}"
                 )
-                logger.debug(f"[lark_enhance] Injected {len(memories)} memories for user {sender_id}")
+                logger.debug(
+                    f"[lark_enhance] Injected {len(memories)} memories for user {sender_id} "
+                    f"(scope={memory_scope})"
+                )
 
-        group_memories = plugin._memory_store.get_group_memories(group_id, limit=inject_limit)
-        if group_memories:
-            group_memory_str = plugin._memory_store.format_memories_for_prompt(group_memories)
-            prompts_to_inject.append(f"[关于当前群的记忆]\n{group_memory_str}")
-            logger.debug(f"[lark_enhance] Injected {len(group_memories)} group memories for {group_id}")
+        # 群记忆：仅群聊生效
+        if group_id:
+            group_memories = plugin._memory_store.get_group_memories(group_id, limit=inject_limit)
+            if group_memories:
+                group_memory_str = plugin._memory_store.format_memories_for_prompt(group_memories)
+                prompts_to_inject.append(f"[关于当前群的记忆]\n{group_memory_str}")
+                logger.debug(f"[lark_enhance] Injected {len(group_memories)} group memories for {group_id}")
 
     if plugin.config.get("enable_vibe_sense", True) and group_id:
         vibe_label, vibe_strategy = plugin._analyze_group_vibe(group_id)
