@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import time
-import uuid
 from typing import Any
 
 from astrbot.api import logger
@@ -111,6 +111,14 @@ class LarkContextMixin:
         group_id = getattr(getattr(event, "message_obj", None), "group_id", None)
         if group_id:
             members = await self._get_group_members(lark_client, group_id)
+            name = (
+                getattr(self, "_group_member_names_by_id", {})
+                .get(group_id, {})
+                .get(open_id)
+            )
+            if name:
+                self._set_user_cache(open_id, name)
+                return name
             for name, member_id in members.items():
                 if member_id == open_id:
                     self._set_user_cache(open_id, name)
@@ -119,7 +127,10 @@ class LarkContextMixin:
         if event and open_id == event.get_sender_id():
             nickname = event.message_obj.sender.nickname
             if nickname and nickname not in (
-                open_id, open_id[:8], placeholder, "未知用户"
+                open_id,
+                open_id[:8],
+                placeholder,
+                "未知用户",
             ):
                 self._set_user_cache(open_id, nickname)
                 return nickname
@@ -160,14 +171,20 @@ class LarkContextMixin:
 
         return None
 
-    async def _get_group_members(self, lark_client: Any, chat_id: str) -> dict[str, str]:
+    async def _get_group_members(
+        self, lark_client: Any, chat_id: str
+    ) -> dict[str, str]:
         """获取群成员列表，返回 nickname -> open_id 的映射。"""
         if chat_id in self.group_members_cache:
             if self._is_cache_valid(self._group_members_cache_time.get(chat_id, 0)):
                 return self.group_members_cache[chat_id]
 
-        logger.debug(f"[lark_enhance] Querying Lark group members for chat_id: {chat_id}")
+        logger.debug(
+            f"[lark_enhance] Querying Lark group members for chat_id: {chat_id}"
+        )
         members_map: dict[str, str] = {}
+        names_by_id: dict[str, str] = {}
+        ambiguous_names: set[str] = set()
 
         try:
             im = getattr(lark_client, "im", None)
@@ -193,7 +210,9 @@ class LarkContextMixin:
                 response = await im.v1.chat_members.aget(request)
 
                 if not response.success():
-                    logger.warning(f"获取飞书群成员失败: {response.code} - {response.msg}")
+                    logger.warning(
+                        f"获取飞书群成员失败: {response.code} - {response.msg}"
+                    )
                     break
 
                 if response.data and response.data.items:
@@ -201,15 +220,28 @@ class LarkContextMixin:
                         member_id = getattr(member, "member_id", None)
                         name = getattr(member, "name", None)
                         if member_id and name:
-                            members_map[name] = member_id
+                            names_by_id[member_id] = name
+                            if name in members_map and members_map[name] != member_id:
+                                ambiguous_names.add(name)
+                            if name not in ambiguous_names:
+                                members_map[name] = member_id
+                            else:
+                                members_map.pop(name, None)
                             self._set_user_cache(member_id, name)
 
-                if response.data and response.data.has_more and response.data.page_token:
+                if (
+                    response.data
+                    and response.data.has_more
+                    and response.data.page_token
+                ):
                     page_token = response.data.page_token
                 else:
                     break
 
             self.group_members_cache[chat_id] = members_map
+            if not hasattr(self, "_group_member_names_by_id"):
+                self._group_member_names_by_id = {}
+            self._group_member_names_by_id[chat_id] = names_by_id
             self._group_members_cache_time[chat_id] = time.time()
             self._mention_pattern_cache.pop(chat_id, None)
             logger.info(
@@ -265,14 +297,25 @@ class LarkContextMixin:
 
         im = getattr(lark_client, "im", None)
         if im is None or im.v1 is None or im.v1.message_resource is None:
-            logger.warning("[lark_enhance] lark_client.im.message_resource 未初始化，无法下载引用图片")
+            logger.warning(
+                "[lark_enhance] lark_client.im.message_resource 未初始化，无法下载引用图片"
+            )
             return file_paths
 
         quoted_dir = self._data_dir / "quoted_images"
         quoted_dir.mkdir(parents=True, exist_ok=True)
+        self._cleanup_quoted_images()
 
-        for idx, image_key in enumerate(image_keys):
+        for image_key in image_keys:
             try:
+                digest = hashlib.sha256(
+                    f"{message_id}:{image_key}".encode()
+                ).hexdigest()
+                file_path = quoted_dir / f"{digest}.jpg"
+                if file_path.is_file():
+                    file_path.touch()
+                    file_paths.append(str(file_path))
+                    continue
                 request = (
                     GetMessageResourceRequest.builder()
                     .message_id(message_id)
@@ -293,7 +336,16 @@ class LarkContextMixin:
                 if not image_bytes:
                     continue
 
-                file_path = quoted_dir / f"{message_id}_{idx}_{uuid.uuid4().hex[:8]}.jpg"
+                used = sum(
+                    path.stat().st_size
+                    for path in quoted_dir.iterdir()
+                    if path.is_file()
+                )
+                if used + len(image_bytes) > self._QUOTED_IMAGE_MAX_BYTES:
+                    logger.warning(
+                        "[lark_enhance] Quoted image cache is full; skipping image"
+                    )
+                    continue
                 file_path.write_bytes(image_bytes)
                 file_paths.append(str(file_path))
             except Exception as e:
@@ -304,18 +356,44 @@ class LarkContextMixin:
 
         return file_paths
 
+    _QUOTED_IMAGE_TTL = 3600
+    _QUOTED_IMAGE_MAX_BYTES = 128 * 1024 * 1024
+
+    def _cleanup_quoted_images(self):
+        """Reuse downloads, expire old files and bound disk usage without evicting new inputs."""
+        directory = self._data_dir / "quoted_images"
+        if not directory.exists():
+            return
+        cutoff = time.time() - self._QUOTED_IMAGE_TTL
+        for path in directory.iterdir():
+            try:
+                if path.is_file() and path.stat().st_mtime < cutoff:
+                    path.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.debug(
+                    f"[lark_enhance] Could not expire quoted image: {type(exc).__name__}"
+                )
+
     async def _get_message_content(
         self,
         lark_client: Any,
         message_id: str,
+        event: AstrMessageEvent | None = None,
     ) -> tuple[str | None, str | None, list[str]] | None:
         """获取消息内容和发送者信息。"""
         try:
-            request = GetMessageRequest.builder().message_id(message_id).build()
+            request = (
+                GetMessageRequest.builder()
+                .message_id(message_id)
+                .user_id_type("open_id")
+                .build()
+            )
 
             im = getattr(lark_client, "im", None)
             if im is None or im.v1 is None or im.v1.message is None:
-                logger.warning("[lark_enhance] lark_client.im 未初始化，无法获取引用消息")
+                logger.warning(
+                    "[lark_enhance] lark_client.im 未初始化，无法获取引用消息"
+                )
                 return None
 
             response = await im.v1.message.aget(request)
@@ -326,19 +404,26 @@ class LarkContextMixin:
                 sender_name = None
                 sender = getattr(msg_item, "sender", None)
                 if sender:
-                    sender_id_obj = getattr(sender, "sender_id", None)
-                    if sender_id_obj:
-                        sender_open_id = getattr(sender_id_obj, "open_id", None)
-                        if sender_open_id:
-                            sender_name = await self._get_user_nickname(
-                                lark_client,
-                                sender_open_id,
-                            )
+                    sender_open_id = getattr(sender, "id", None)
+                    if (
+                        sender_open_id
+                        and getattr(sender, "id_type", "open_id") == "open_id"
+                    ):
+                        sender_name = await self._get_user_nickname(
+                            lark_client, sender_open_id, event
+                        )
+                    sender_name = (
+                        sender_name
+                        or getattr(sender, "sender_name", None)
+                        or sender_open_id
+                    )
 
                 mentions = getattr(msg_item, "mentions", None)
 
                 body = getattr(msg_item, "body", None)
-                content, image_keys = await self._parse_message_body(lark_client, body, mentions)
+                content, image_keys = await self._parse_message_body(
+                    lark_client, body, mentions
+                )
                 quoted_images = await self._download_quoted_images(
                     lark_client=lark_client,
                     message_id=message_id,
@@ -391,7 +476,9 @@ class LarkContextMixin:
                         elif tag == "at":
                             user_id = segment.get("user_id")
                             if user_id:
-                                real_name = await self._get_user_nickname(lark_client, user_id)
+                                real_name = await self._get_user_nickname(
+                                    lark_client, user_id
+                                )
                                 texts.append(f"@{real_name or user_id}")
                             else:
                                 texts.append("@未知用户")

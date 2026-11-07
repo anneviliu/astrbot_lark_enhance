@@ -25,13 +25,12 @@ from .lark_enhance.mixins import (
     LarkContextMixin,
     StreamingMixin,
     TextMixin,
-    configure_streaming_runtime,
 )
 from .lark_enhance.stores import UserMemoryStore
 
 
 class Main(HistoryMixin, LarkContextMixin, TextMixin, StreamingMixin, star.Star):
-    _VERSION = "0.3.1"
+    _VERSION = "0.3.2"
 
     _CACHE_TTL = 300
     _SAVE_DEBOUNCE = 5
@@ -45,6 +44,9 @@ class Main(HistoryMixin, LarkContextMixin, TextMixin, StreamingMixin, star.Star)
     def __init__(self, context: star.Context, config: dict | None = None):
         super().__init__(context)
         self.config = config or {}
+        self._closed = False
+        self._history_save_handle = None
+        self._reacting_messages: set[str] = set()
 
         self.user_cache: OrderedDict[str, tuple[str, float]] = OrderedDict()
         self.group_members_cache: dict[str, dict[str, str]] = {}
@@ -71,13 +73,6 @@ class Main(HistoryMixin, LarkContextMixin, TextMixin, StreamingMixin, star.Star)
 
         atexit.register(self._atexit_save)
 
-        configure_streaming_runtime(self.config, self._clean_content)
-
-        if self.config.get("enable_streaming_card", False):
-            self._setup_streaming_patch()
-        else:
-            logger.info("[lark_enhance] Streaming card is disabled by config")
-
         logger.info(
             f"[lark_enhance] ====== Plugin loaded successfully ====== "
             f"Version: {self._VERSION}, "
@@ -85,6 +80,16 @@ class Main(HistoryMixin, LarkContextMixin, TextMixin, StreamingMixin, star.Star)
             f"VibeSense: {self.config.get('enable_vibe_sense', True)}, "
             f"MemeMemory: {self.config.get('enable_meme_memory', True)}"
         )
+
+    async def terminate(self):
+        """Flush pending writes before a reload and release process callbacks."""
+        if self._closed:
+            return
+        self._cancel_history_save()
+        self._flush_pending_save()
+        self._cancel_history_save()  # a failed final flush must not leave a retry timer
+        self._closed = True
+        atexit.unregister(self._atexit_save)
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.LARK)
     async def on_message(self, event: AstrMessageEvent):

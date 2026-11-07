@@ -64,9 +64,15 @@
         "type": "int",
         "default": 30
     },
+    "debug_log_payload": {
+        "description": "调试时以 DEBUG 级别输出完整提示词和对话（可能包含敏感信息，默认关闭）",
+        "type": "bool",
+        "default": false
+    },
     "memory_inject_limit": {
         "description": "每次请求 LLM 时最多注入的记忆条数",
         "type": "int",
         "default": 10
     }
 }
+

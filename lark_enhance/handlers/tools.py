@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from functools import wraps
 from typing import Any
 
 from astrbot.api import logger
@@ -11,6 +12,21 @@ from lark_oapi.api.im.v1 import (
     CreateMessageReactionRequestBody,
 )
 from lark_oapi.api.im.v1.model import Emoji
+
+from ..services.memory_policy import enabled_memory_types
+from ..stores.user_memory_store import MemoryPersistenceError
+
+
+def _memory_errors(handler):
+    @wraps(handler)
+    async def guarded(*args, **kwargs):
+        try:
+            return await handler(*args, **kwargs)
+        except MemoryPersistenceError as exc:
+            logger.error(f"[lark_enhance] Memory operation failed: {exc}")
+            return "记忆文件读写失败，操作未完成，请检查存储后重试。"
+
+    return guarded
 
 
 _EMOJI_ALIASES = {
@@ -88,6 +104,11 @@ async def handle_lark_emoji_reply(plugin: Any, event: AstrMessageEvent, emoji: s
             f"[lark_enhance] Normalize emoji code: {emoji} -> {normalized_emoji}"
         )
 
+    if not hasattr(plugin, "_reacting_messages"):
+        plugin._reacting_messages = set()
+    if message_id in plugin._reacting_messages:
+        return "该消息正在添加表情，请勿重复调用。"
+    plugin._reacting_messages.add(message_id)
     try:
         im = getattr(lark_client, "im", None)
         if im is None or im.v1 is None or im.v1.message_reaction is None:
@@ -153,8 +174,11 @@ async def handle_lark_emoji_reply(plugin: Any, event: AstrMessageEvent, emoji: s
     except Exception as e:
         logger.error(f"[lark_enhance] React failed: {e}")
         return f"添加 {emoji} 表情失败"
+    finally:
+        plugin._reacting_messages.discard(message_id)
 
 
+@_memory_errors
 async def handle_lark_save_memory(
     plugin: Any,
     event: AstrMessageEvent,
@@ -165,7 +189,8 @@ async def handle_lark_save_memory(
     if not plugin._is_lark_event(event):
         return "不是飞书平台，无法使用记忆功能。"
 
-    if not plugin.config.get("enable_user_memory", True):
+    allowed_types = enabled_memory_types(plugin.config)
+    if not allowed_types:
         return "记忆功能未启用。"
 
     group_id = event.message_obj.group_id
@@ -175,6 +200,10 @@ async def handle_lark_save_memory(
     valid_types = {"preference", "fact", "instruction", "meme"}
     if memory_type not in valid_types:
         return f"无效的记忆类型。请使用: {', '.join(valid_types)}"
+    if memory_type not in allowed_types:
+        return "所选记忆类型未启用。"
+    if not isinstance(content, str) or not content.strip():
+        return "记忆内容不能为空。"
 
     valid_scopes = {"user", "group"}
     if scope not in valid_scopes:
@@ -209,6 +238,7 @@ async def handle_lark_save_memory(
     return "保存记忆失败，请稍后重试。"
 
 
+@_memory_errors
 async def handle_lark_list_memory(
     plugin: Any,
     event: AstrMessageEvent,
@@ -218,7 +248,8 @@ async def handle_lark_list_memory(
     if not plugin._is_lark_event(event):
         return "不是飞书平台，无法使用记忆功能。"
 
-    if not plugin.config.get("enable_user_memory", True):
+    allowed_types = enabled_memory_types(plugin.config)
+    if not allowed_types:
         return "记忆功能未启用。"
 
     group_id = event.message_obj.group_id
@@ -232,6 +263,8 @@ async def handle_lark_list_memory(
     if memory_type not in valid_types:
         return f"无效的记忆类型。请使用: {', '.join(valid_types)}"
     type_filter = None if memory_type == "all" else memory_type
+    if type_filter and type_filter not in allowed_types:
+        return "所选记忆类型未启用。"
 
     results = []
 
@@ -243,9 +276,12 @@ async def handle_lark_list_memory(
                 sender_id,
                 limit=50,
                 memory_type=type_filter,
+                memory_types=allowed_types,
             )
             if user_memories:
-                user_memory_str = plugin._memory_store.format_memories_for_prompt(user_memories)
+                user_memory_str = plugin._memory_store.format_memories_for_prompt(
+                    user_memories
+                )
                 results.append(f"【个人记忆】\n{user_memory_str}")
 
     if scope in ("group", "all"):
@@ -253,9 +289,12 @@ async def handle_lark_list_memory(
             group_id,
             limit=50,
             memory_type=type_filter,
+            memory_types=allowed_types,
         )
         if group_memories:
-            group_memory_str = plugin._memory_store.format_memories_for_prompt(group_memories)
+            group_memory_str = plugin._memory_store.format_memories_for_prompt(
+                group_memories
+            )
             results.append(f"【群记忆】\n{group_memory_str}")
 
     if not results:
@@ -268,6 +307,7 @@ async def handle_lark_list_memory(
     return "在这个群里，我记得以下信息：\n\n" + "\n\n".join(results)
 
 
+@_memory_errors
 async def handle_lark_forget_memory(
     plugin: Any,
     event: AstrMessageEvent,
@@ -278,7 +318,8 @@ async def handle_lark_forget_memory(
     if not plugin._is_lark_event(event):
         return "不是飞书平台，无法使用记忆功能。"
 
-    if not plugin.config.get("enable_user_memory", True):
+    allowed_types = enabled_memory_types(plugin.config)
+    if not allowed_types:
         return "记忆功能未启用。"
 
     group_id = event.message_obj.group_id
@@ -292,12 +333,15 @@ async def handle_lark_forget_memory(
     if memory_type not in valid_types:
         return f"无效的记忆类型。请使用: {', '.join(valid_types)}"
     type_filter = None if memory_type == "all" else memory_type
+    if type_filter and type_filter not in allowed_types:
+        return "所选记忆类型未启用。"
 
     if scope == "group":
         deleted_count = plugin._memory_store.delete_group_memories(
             group_id,
             target,
             memory_type=type_filter,
+            memory_types=allowed_types,
         )
         scope_desc = "群记忆"
     else:
@@ -309,6 +353,7 @@ async def handle_lark_forget_memory(
             sender_id,
             target,
             memory_type=type_filter,
+            memory_types=allowed_types,
         )
         scope_desc = "个人记忆"
 
@@ -319,4 +364,6 @@ async def handle_lark_forget_memory(
 
     if target == "all":
         return f"好的，我已经清除了所有{scope_desc}（共 {deleted_count} 条）。"
-    return f"好的，我已经删除了包含「{target}」的{scope_desc}（共 {deleted_count} 条）。"
+    return (
+        f"好的，我已经删除了包含「{target}」的{scope_desc}（共 {deleted_count} 条）。"
+    )

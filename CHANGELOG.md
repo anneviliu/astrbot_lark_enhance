@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2026-11-07
+
+- 修复热重载后旧 atexit 回调覆盖新历史、待写历史没有延迟刷新，以及 reset 标记/平台 ID 不兼容。
+- 历史和记忆使用原子写入；记忆修改在落盘成功后更新缓存，写入/删除失败明确返回失败。
+- 流式增强改为单次事件观察器，保留原生 CardKit，支持提及转换、普通回退、机器人历史和非文本组件发送。
+- 修复引用发送者 SDK 字段、重复姓名和前缀提及、JSON 类型异常；引用图片增加复用、到期清理及容量预算。
+- 统一记忆类型开关，避免子串去重丢信息；表情调用增加并发互斥；完整请求日志改为显式调试开关。
+- 将旧插件模块改为兼容别名，避免两套实现继续分叉；扩展离线回归和真实框架集成测试。
+
 ## [0.3.1] - 2026-02-21
 
 ### Added
