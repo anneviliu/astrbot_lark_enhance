@@ -58,8 +58,9 @@ class LarkContextMixin:
         open_id: str,
         event: AstrMessageEvent | None = None,
     ) -> str | None:
+        placeholder = f"用户({open_id[-4:]})"
         cached = self._get_user_from_cache(open_id)
-        if cached is not None:
+        if cached is not None and cached != placeholder:
             return cached
 
         if event and open_id == event.get_self_id():
@@ -69,39 +70,61 @@ class LarkContextMixin:
 
         logger.debug(f"[lark_enhance] Querying Lark user info for open_id: {open_id}")
 
-        try:
-            request = (
-                GetUserRequest.builder()
-                .user_id(open_id)
-                .user_id_type("open_id")
-                .build()
-            )
-
-            contact = getattr(lark_client, "contact", None)
-            if contact is None or contact.v3 is None or contact.v3.user is None:
-                logger.warning(
-                    "[lark_enhance] lark_client.contact 未初始化，无法获取用户信息"
+        if cached is None:
+            try:
+                request = (
+                    GetUserRequest.builder()
+                    .user_id(open_id)
+                    .user_id_type("open_id")
+                    .build()
                 )
-                return None
 
-            response = await contact.v3.user.aget(request)
+                contact = getattr(lark_client, "contact", None)
+                if contact is None or contact.v3 is None or contact.v3.user is None:
+                    logger.warning(
+                        "[lark_enhance] lark_client.contact 未初始化，尝试群成员信息"
+                    )
+                else:
+                    response = await contact.v3.user.aget(request)
 
-            if response.success() and response.data and response.data.user:
-                nickname = response.data.user.name
+                    if response.success() and response.data and response.data.user:
+                        nickname = response.data.user.name
+                        if nickname:
+                            self._set_user_cache(open_id, nickname)
+                            return nickname
+                    if response.code == 41050:
+                        logger.debug(
+                            f"[lark_enhance] 获取飞书用户信息失败 (权限不足): {response.msg}，"
+                            "尝试群成员信息"
+                        )
+                        self._set_user_cache(open_id, placeholder)
+                        cached = placeholder
+                    else:
+                        logger.warning(
+                            f"[lark_enhance] 获取飞书用户信息失败: {response.code} - {response.msg}"
+                        )
+            except Exception as e:
+                logger.error(f"[lark_enhance] 获取飞书用户信息异常: {e}")
+
+        # 群成员接口可返回通讯录不可见用户的名称。即使旧缓存为占位符，
+        # 也要先尝试群成员名单；成功后用真实名称覆盖占位符。
+        group_id = getattr(getattr(event, "message_obj", None), "group_id", None)
+        if group_id:
+            members = await self._get_group_members(lark_client, group_id)
+            for name, member_id in members.items():
+                if member_id == open_id:
+                    self._set_user_cache(open_id, name)
+                    return name
+
+        if event and open_id == event.get_sender_id():
+            nickname = event.message_obj.sender.nickname
+            if nickname and nickname not in (
+                open_id, open_id[:8], placeholder, "未知用户"
+            ):
                 self._set_user_cache(open_id, nickname)
                 return nickname
-            if response.code == 41050:
-                logger.debug(
-                    f"获取飞书用户信息失败 (权限不足): {response.msg}。可能是机器人ID或外部联系人。"
-                )
-                placeholder = f"用户({open_id[-4:]})"
-                self._set_user_cache(open_id, placeholder)
-                return placeholder
-            logger.warning(f"获取飞书用户信息失败: {response.code} - {response.msg}")
-        except Exception as e:
-            logger.error(f"获取飞书用户信息异常: {e}")
 
-        return None
+        return cached
 
     async def _get_group_info(self, lark_client: Any, chat_id: str) -> dict | None:
         """获取群组信息（名称和描述）。"""

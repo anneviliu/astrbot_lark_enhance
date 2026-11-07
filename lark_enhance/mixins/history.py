@@ -4,12 +4,27 @@ import json
 import re
 import time
 from collections import deque
+from datetime import datetime
 
 from astrbot.api import logger
 
 
 class HistoryMixin:
     """群历史与氛围分析相关逻辑。"""
+
+    @staticmethod
+    def _format_history_time(timestamp: float | str | None = None) -> str:
+        """使用消息时间（秒或毫秒），按 AstrBot 所在系统时区记录完整日期。"""
+        if timestamp is not None:
+            try:
+                value = float(timestamp)
+                if value >= 100_000_000_000:
+                    value /= 1000
+                if value > 0:
+                    return datetime.fromtimestamp(value).strftime("%Y-%m-%d %H:%M:%S")
+            except (TypeError, ValueError, OverflowError, OSError):
+                pass
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     def _atexit_save(self):
         """程序退出时保存历史记录。"""

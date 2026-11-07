@@ -13,7 +13,7 @@
 - 群梗记忆（自动捕获 + 工具读写 + prompt 注入）。
 - 拟人节奏控制（短句、口语化、节奏变化）。
 - `@名字` 自动转换为飞书 `At` 组件。
-- 流式卡片打字机输出（Patch API）。
+- 流式卡片输出（优先框架原生 CardKit，旧版兼容 Patch API）。
 - 用户记忆（群维度 + 用户维度）存储与注入。
 - 工具：`lark_emoji_reply`（单条消息限一次反应）。
 
@@ -67,10 +67,11 @@
 ## 5. 流式卡片实现
 
 开启 `enable_streaming_card` 后：
-- 通过 monkey patch 替换 `LarkMessageEvent.send_streaming`。
-- 使用 `LarkStreamingCard` 创建、增量更新、最终完成卡片。
-- 走 `im.v1.message.patch`（代码使用 `apatch`）更新内容。
-- 内置节流策略，平衡实时性与 API 压力。
+- 检测到 `_create_streaming_card`、`_update_streaming_text`、`_close_streaming_mode` 均可调用时，保留框架原生 `LarkMessageEvent.send_streaming`，不安装补丁。
+- 仅对缺少原生 CardKit 流式能力的旧版框架安装 monkey patch。
+- 旧版补丁使用 `LarkStreamingCard` 创建、增量更新、最终完成卡片。
+- 旧版补丁走 `im.v1.message.patch`（代码使用 `apatch`）更新内容。
+- 旧版补丁内置节流策略，平衡实时性与 API 压力。
 
 ## 6. 持久化与缓存策略
 
@@ -79,6 +80,9 @@
 - 触发：接收消息与机器人发言时更新
 - 保存：防抖写盘
 - 清理：`/reset` 会清空当前群历史
+- 新记录的 `time` 使用 `YYYY-MM-DD HH:MM:SS`（AstrBot 所在系统时区）；收到的消息优先使用框架消息时间，机器人发言使用发送时刻。
+- 开启 `enable_real_name` 时优先通讯录姓名，失败后尝试群成员名称，再保留已有昵称或用户标识；占位姓名缓存不能阻止后续群成员名称解析。
+- 兼容旧的纯时刻记录，不推测补填未知日期或姓名。
 
 ### 6.2 缓存
 - 用户昵称缓存：LRU + TTL
@@ -101,7 +105,7 @@
 | `enable_real_name` | bool | `true` | 启用真实姓名转换 |
 | `enable_quoted_content` | bool | `true` | 启用引用消息增强 |
 | `enable_group_info` | bool | `true` | 注入群名称/描述到上下文 |
-| `enable_streaming_card` | bool | `false` | 启用流式卡片输出（需同时开启 AstrBot 流式输出） |
+| `enable_streaming_card` | bool | `false` | 优先保留原生 CardKit，旧版启用插件流式卡片（需同时开启 AstrBot 流式输出） |
 | `enable_vibe_sense` | bool | `true` | 启用群聊氛围感知 |
 | `enable_meme_memory` | bool | `true` | 启用群梗记忆 |
 | `enable_human_rhythm` | bool | `true` | 启用拟人节奏控制 |
