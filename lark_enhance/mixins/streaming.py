@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import inspect
-from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.message_components import Plain
@@ -36,6 +35,20 @@ class StreamingMixin:
                 logger.warning(
                     "[lark_enhance] LarkMessageEvent 没有 send_streaming 方法，"
                     "可能框架版本不兼容，跳过流式卡片补丁"
+                )
+                return
+
+            # 新版 AstrBot 已使用 CardKit，并在独立协程中发送更新。
+            # 保留原生方法，避免 Patch API 的网络等待拖慢 token 消费。
+            native_helpers = (
+                "_create_streaming_card",
+                "_update_streaming_text",
+                "_close_streaming_mode",
+            )
+            if all(callable(getattr(LarkMessageEvent, name, None)) for name in native_helpers):
+                logger.info(
+                    "[lark_enhance] Native CardKit streaming detected, "
+                    "keeping AstrBot send_streaming"
                 )
                 return
 

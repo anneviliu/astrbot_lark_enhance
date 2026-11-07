@@ -68,7 +68,9 @@ async def handle_on_message(plugin: Any, event: AstrMessageEvent):
         try:
             plugin._ensure_history_deque(group_id, history_count)
 
-            time_str = datetime.datetime.now().strftime("%H:%M:%S")
+            time_str = plugin._format_history_time(
+                getattr(event.message_obj, "timestamp", None)
+            )
             sender_name = (
                 event.message_obj.sender.nickname or sender_id or "未知用户"
             )
@@ -139,7 +141,7 @@ async def handle_on_message_sent(plugin: Any, event: AstrMessageEvent):
     try:
         plugin._ensure_history_deque(group_id, history_count)
 
-        time_str = datetime.datetime.now().strftime("%H:%M:%S")
+        time_str = plugin._format_history_time()
         sender_name = plugin.config.get("bot_name", "助手")
 
         content_str = ""

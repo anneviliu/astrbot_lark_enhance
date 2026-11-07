@@ -15,7 +15,7 @@
         "default": true
     },
     "enable_streaming_card": {
-        "description": "是否启用流式卡片输出（打字机效果，需同时开启 AstrBot 的流式输出）",
+        "description": "是否启用流式卡片兼容支持（优先保留 AstrBot 原生 CardKit，旧版使用插件卡片；需同时开启 AstrBot 流式输出）",
         "type": "bool",
         "default": false
     },
