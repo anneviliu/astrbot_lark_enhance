@@ -83,6 +83,8 @@
 
 ## 🚀 安装与使用
 
+兼容性验证：已在 Python 3.12 环境通过 AstrBot **v4.27.2 / v4.29.4** 的真实插件加载器、事件/工具注册、消息处理、原生流式及热重载验证。复现步骤见 [测试说明](tests/README.md)。真实飞书 API 权限与显示效果仍需在部署环境验证。
+
 1. 将本插件目录放入 AstrBot 的 `data/plugins/` 目录下。
 2. 安装依赖：`pip install -r requirements.txt`
 3. 重启 AstrBot。

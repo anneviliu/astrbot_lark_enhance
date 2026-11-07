@@ -19,7 +19,7 @@
 
 ## 2. 运行环境与安装
 
-- Python: 3.10+
+- 插件语法：Python 3.10+；已验证的 AstrBot v4.27.2 / v4.29.4 框架要求 Python 3.12+。
 - 依赖：见 `requirements.txt`（主要为 `lark-oapi`）
 - 插件路径：`AstrBot/data/plugins/astrbot_lark_enhance`
 
@@ -126,6 +126,8 @@
 - 新增配置必须同时更新 `_conf_schema.json` 与本文档。
 
 ## 10. 手工测试清单
+
+自动化验证见 `tests/README.md`：离线单元测试与真实框架集成脚本 `tests/framework_smoke.py` 分进程运行。后者使用真实加载器和事件/工具接口，仅模拟飞书 API 网络响应。
 
 最小回归建议：
 1. 提及解析：消息含 `@` 时，LLM 获取到真实昵称。
