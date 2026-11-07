@@ -31,7 +31,8 @@
 
 ## 3. 代码结构与关键文件
 
-- `main.py`: 插件主体（事件钩子、缓存、历史、记忆、流式卡片、工具实现）。
+- `main.py`: 插件入口、钩子、工具注册及卸载流程；实现分布在 handlers / mixins / services / stores。
+- `lark_enhance/plugin.py`: 旧导入路径兼容别名，统一指向入口 Main，不保留重复实现。
 - `_conf_schema.json`: 配置定义与默认值。
 - `metadata.yaml`: 插件元信息。
 - `data/group_history.json`: 群聊历史持久化。
@@ -66,20 +67,20 @@
 
 ## 5. 流式卡片实现
 
-开启 `enable_streaming_card` 后：
-- 检测到 `_create_streaming_card`、`_update_streaming_text`、`_close_streaming_mode` 均可调用时，保留框架原生 `LarkMessageEvent.send_streaming`，不安装补丁。
-- 仅对缺少原生 CardKit 流式能力的旧版框架安装 monkey patch。
-- 旧版补丁使用 `LarkStreamingCard` 创建、增量更新、最终完成卡片。
-- 旧版补丁走 `im.v1.message.patch`（代码使用 `apatch`）更新内容。
-- 旧版补丁内置节流策略，平衡实时性与 API 压力。
+流式增强绑定到单次事件，不修改框架的全局类方法：
+- 原生 CardKit 的创建、更新和关闭仍由 AstrBot 执行，插件仅转换跨 token 提及并记录最终正文。
+- `enable_streaming_card=true` 且缺少原生 CardKit 能力时，使用兼容卡片；创建失败委托原发送器，更新/完成失败用缓冲正文回退。
+- 保留工具调用分界；非文本组件通过普通发送接口交付，普通消息回退将 CardKit 标签还原为 At 组件。
+- 重载后旧事件可完成原发送过程，已关闭实例不再写历史。
 
 ## 6. 持久化与缓存策略
 
 ### 6.1 群历史
 - 存储文件：`data/group_history.json`
 - 触发：接收消息与机器人发言时更新
-- 保存：防抖写盘
-- 清理：`/reset` 会清空当前群历史
+- 保存：延迟刷新定时器 + 临时文件、fsync、原子替换；失败保留旧文件并允许重试。
+- 卸载：terminate 刷新待写数据、取消定时器并注销 atexit，旧实例无法覆盖新历史。
+- 清理：识别框架当前与旧版 reset 标记，按事件实际群 ID 清空当前群历史。
 - 新记录的 `time` 使用 `YYYY-MM-DD HH:MM:SS`（AstrBot 所在系统时区）；收到的消息优先使用框架消息时间，机器人发言使用发送时刻。
 - 开启 `enable_real_name` 时优先通讯录姓名，失败后尝试群成员名称，再保留已有昵称或用户标识；占位姓名缓存不能阻止后续群成员名称解析。
 - 兼容旧的纯时刻记录，不推测补填未知日期或姓名。
@@ -89,14 +90,18 @@
 - 群成员缓存：TTL（用于 mention 转换）
 - 群信息缓存：TTL（用于上下文注入）
 - mention 正则缓存：TTL
+- 同名成员从自动提及映射中排除，ID -> 姓名映射仍用于昵称解析。
+- 引用图片按消息/图片 key 复用，闲置 TTL 一小时，新增下载总预算 128 MiB；到期清理。
 
 ## 7. 用户记忆功能
 
-当 `enable_user_memory=true`：
+记忆开关按类型独立控制：`enable_user_memory` 管理 instruction/preference/fact，`enable_meme_memory` 管理 meme；查询、删除、注入使用相同筛选。
 - 记录用户偏好/事实/指令等记忆。
 - 按群和用户维度管理。
 - 受 `memory_max_per_user`、`memory_max_per_group` 限制。
 - 每次请求按 `memory_inject_limit` 注入到 LLM 请求上下文。
+- 修改采用副本提交，仅在原子落盘成功后更新缓存；写入失败不返回成功，不覆盖已有有效文件。
+- 新增记忆仅合并完全相同的内容，不用子串覆盖完整事实；拒绝空内容。
 
 ## 8. 配置项（与 `_conf_schema.json` 对齐）
 
@@ -116,6 +121,7 @@
 | `memory_max_per_user` | int | `20` | 每用户每群最大记忆条数 |
 | `memory_max_per_group` | int | `30` | 每群最大群维度记忆条数 |
 | `memory_inject_limit` | int | `10` | 每次请求最大注入记忆条数 |
+| `debug_log_payload` | bool | `false` | 显式开启后以 DEBUG 级别输出完整请求；默认仅摘要 |
 
 ## 9. 开发规范
 
@@ -149,4 +155,5 @@
 
 - 涉及 prompt 注入逻辑时，优先保证“可解释、可回滚、可观测”（日志可追踪）。
 - 涉及缓存/持久化结构变更时，考虑旧数据兼容与异常恢复。
-- 涉及 monkey patch 时，必须保持回退路径（fallback 到原始流式发送）。
+- 流式增强使用事件级观察器，保留框架原生类方法和普通发送回退路径。
+

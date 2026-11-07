@@ -1,132 +1,233 @@
 from __future__ import annotations
 
-import inspect
+import re
+import weakref
+from copy import copy
+from functools import wraps
 
 from astrbot.api import logger
-from astrbot.api.message_components import Plain
+from astrbot.api.event import AstrMessageEvent
+from astrbot.api.message_components import At, Plain
 
+from ..services.mentions import StreamMentions
 from ..services.streaming_card import LarkStreamingCard, empty_generator
 
 
-_original_lark_send_streaming = None
-_streaming_config: dict | None = None
-_clean_content_func = None
+def _chain_with(chain, components, kind=None):
+    derived = copy(chain)
+    derived.chain = components
+    if kind is not None:
+        derived.type = kind
+    return derived
 
 
-def configure_streaming_runtime(config: dict, clean_content_func):
-    """设置流式补丁需要的全局引用。"""
-    global _streaming_config, _clean_content_func
-    _streaming_config = config
-    _clean_content_func = clean_content_func
+def _restore_mentions(chain, by_id: dict[str, str]):
+    """CardKit uses id=; ordinary post messages require actual At components."""
+    pattern = re.compile(r'<at id="([^"]+)"></at>')
+    components = []
+    for component in chain.chain:
+        if not isinstance(component, Plain):
+            components.append(component)
+            continue
+        end = 0
+        for match in pattern.finditer(component.text):
+            if match.group(1) not in by_id:
+                continue
+            if match.start() > end:
+                components.append(Plain(component.text[end : match.start()]))
+            components.append(At(qq=match.group(1), name=by_id[match.group(1)]))
+            end = match.end()
+        if end < len(component.text):
+            components.append(Plain(component.text[end:]))
+    return _chain_with(chain, components)
 
 
 class StreamingMixin:
-    """流式卡片 monkey patch 能力。"""
+    """Observe individual events; never replace the framework's class methods."""
 
-    def _setup_streaming_patch(self):
-        """设置流式卡片的 monkey patch。"""
-        global _original_lark_send_streaming
-
-        try:
-            from astrbot.core.platform.astr_message_event import AstrMessageEvent as BaseEvent
-            from astrbot.core.platform.sources.lark.lark_event import LarkMessageEvent
-
-            if not hasattr(LarkMessageEvent, "send_streaming"):
-                logger.warning(
-                    "[lark_enhance] LarkMessageEvent 没有 send_streaming 方法，"
-                    "可能框架版本不兼容，跳过流式卡片补丁"
-                )
-                return
-
-            # 新版 AstrBot 已使用 CardKit，并在独立协程中发送更新。
-            # 保留原生方法，避免 Patch API 的网络等待拖慢 token 消费。
-            native_helpers = (
+    @staticmethod
+    def _has_native_cardkit(event) -> bool:
+        return all(
+            callable(getattr(event, name, None))
+            for name in (
                 "_create_streaming_card",
                 "_update_streaming_text",
                 "_close_streaming_mode",
             )
-            if all(callable(getattr(LarkMessageEvent, name, None)) for name in native_helpers):
-                logger.info(
-                    "[lark_enhance] Native CardKit streaming detected, "
-                    "keeping AstrBot send_streaming"
-                )
-                return
+        )
 
-            sig = inspect.signature(LarkMessageEvent.send_streaming)
-            params = list(sig.parameters.keys())
-            if "generator" not in params:
-                logger.warning(
-                    "[lark_enhance] send_streaming 方法签名不符合预期，"
-                    "可能框架版本不兼容，跳过流式卡片补丁"
-                )
-                return
+    def _wrap_event_streaming(self, event):
+        if not callable(getattr(event, "send_streaming", None)) or not callable(
+            getattr(event, "send", None)
+        ):
+            return
+        if event.get_extra("_lark_stream_observer", False):
+            return
+        event.set_extra("_lark_stream_observer", True)
+        owner_ref = weakref.ref(self)
+        original_stream = event.send_streaming
+        original_send = event.send
+        card_members: dict[str, str] = {}
 
-            if _original_lark_send_streaming is not None:
-                logger.debug("[lark_enhance] Streaming patch already applied")
-                return
+        @wraps(original_send)
+        async def send(chain, *args, **kwargs):
+            if card_members:
+                chain = _restore_mentions(chain, card_members)
+            return await original_send(chain, *args, **kwargs)
 
-            _original_lark_send_streaming = LarkMessageEvent.send_streaming
-
-            async def patched_send_streaming(event_self, generator, use_fallback: bool = False):
-                if not (_streaming_config or {}).get("enable_streaming_card", False):
-                    return await _original_lark_send_streaming(event_self, generator, use_fallback)
-
-                if not hasattr(event_self, "bot") or event_self.bot is None:
-                    return await _original_lark_send_streaming(event_self, generator, use_fallback)
-
-                lark_client = event_self.bot
-                chat_id = event_self.message_obj.group_id or event_self.get_sender_id()
-                message_id = event_self.message_obj.message_id
-
-                if not chat_id or not message_id:
-                    return await _original_lark_send_streaming(event_self, generator, use_fallback)
-
-                streaming_card = LarkStreamingCard(
-                    lark_client=lark_client,
-                    chat_id=chat_id,
-                    reply_to_message_id=message_id,
-                )
-
-                if not await streaming_card.create_initial_card():
-                    logger.warning("[lark_enhance] Failed to create streaming card, using fallback")
-                    return await _original_lark_send_streaming(event_self, generator, use_fallback)
-
-                full_content = ""
+        @wraps(original_stream)
+        async def send_streaming(generator, use_fallback=False):
+            owner = owner_ref()
+            if owner is None or getattr(owner, "_closed", False):
+                return await original_stream(generator, use_fallback)
+            group_id = event.message_obj.group_id
+            members = {}
+            if group_id and owner.config.get("enable_mention_convert", True):
                 try:
-                    async for chain in generator:
-                        if chain and chain.chain:
-                            for comp in chain.chain:
-                                if isinstance(comp, Plain):
-                                    full_content += comp.text
-                                elif hasattr(comp, "type"):
-                                    full_content += f" [{comp.type}] "
-                            await streaming_card.update_card(full_content)
+                    members = await owner._get_group_members(event.bot, group_id)
+                except Exception as exc:
+                    logger.warning(
+                        f"[lark_enhance] Streaming mentions unavailable: {type(exc).__name__}"
+                    )
+            card_members.update({open_id: name for name, open_id in members.items()})
+            text_parts = []
+            prepared = owner._prepare_stream(
+                event, generator, members, card_members, text_parts
+            )
+            if owner.config.get(
+                "enable_streaming_card", False
+            ) and not owner._has_native_cardkit(event):
+                await owner._send_legacy_stream(
+                    event, prepared, original_stream, use_fallback
+                )
+            else:
+                await original_stream(prepared, use_fallback)
+            if text_parts and not getattr(owner, "_closed", False):
+                owner._record_sent_text(event, "".join(text_parts))
+                event.set_extra("_lark_stream_history_recorded", True)
 
-                    if _clean_content_func:
-                        full_content = _clean_content_func(full_content)
+        event.send = send
+        event.send_streaming = send_streaming
 
-                    if not full_content.strip():
-                        await streaming_card.delete_card()
-                        logger.info("[lark_enhance] Deleted empty streaming card (no text content)")
-                    else:
-                        await streaming_card.finalize_card(full_content)
-                        logger.info(
-                            f"[lark_enhance] Streaming card completed, length: {len(full_content)}"
+    async def _prepare_stream(
+        self, event, generator, members, card_members, text_parts
+    ):
+        converter = StreamMentions(members)
+        template = None
+        async for chain in generator:
+            if not hasattr(chain, "chain"):
+                yield chain
+                continue
+            kind = getattr(chain, "type", None) or "plain"
+            if kind != "plain":
+                pending = converter.feed("", final=True)
+                if pending and template is not None:
+                    yield _chain_with(template, [Plain(pending)])
+                converter = StreamMentions(members)
+                media_types = {"file", "image", "record", "video"}
+                has_media = any(
+                    str(
+                        getattr(
+                            getattr(c, "type", None), "value", getattr(c, "type", "")
                         )
+                    ).lower()
+                    in media_types
+                    for c in chain.chain
+                )
+                if not has_media:
+                    yield chain
+                    continue
+            template = chain
+            for component in chain.chain:
+                if isinstance(component, Plain):
+                    if kind == "plain":
+                        text_parts.append(component.text)
+                    stable = (
+                        converter.feed(component.text)
+                        if kind == "plain"
+                        else component.text
+                    )
+                    if stable:
+                        yield _chain_with(chain, [Plain(stable)])
+                elif isinstance(component, At):
+                    pending = converter.feed("", final=True)
+                    if pending:
+                        yield _chain_with(chain, [Plain(pending)])
+                    converter = StreamMentions(members)
+                    card_members[str(component.qq)] = component.name or str(
+                        component.qq
+                    )
+                    text_parts.append(f"@{component.name or component.qq}")
+                    yield _chain_with(chain, [Plain(StreamMentions.tag(component.qq))])
+                else:
+                    pending = converter.feed("", final=True)
+                    if pending:
+                        yield _chain_with(chain, [Plain(pending)])
+                    converter = StreamMentions(members)
+                    # Close a preceding card before delivering a file/image normally.
+                    yield _chain_with(chain, [], "break")
+                    await event.send(_chain_with(chain, [component]))
+        pending = converter.feed("", final=True)
+        if pending and template is not None:
+            yield _chain_with(template, [Plain(pending)])
 
-                    await BaseEvent.send_streaming(event_self, empty_generator(), use_fallback)
+    async def _send_legacy_stream(
+        self, event, generator, original_stream, use_fallback
+    ):
+        card = None
+        buffer = ""
+        template = None
+        failed = False
 
-                except Exception as e:
-                    logger.error(f"[lark_enhance] Streaming card error: {e}")
-                    if full_content:
-                        await streaming_card.finalize_card(full_content + "\n\n*（输出中断）*")
-                    else:
-                        await streaming_card.delete_card()
+        async def finish():
+            nonlocal card, buffer, failed
+            delivered = False
+            if card is not None:
+                if not failed:
+                    delivered = await card.finalize_card(buffer)
+                if not delivered:
+                    await card.delete_card()
+            if buffer and not delivered and template is not None:
+                await event.send(_chain_with(template, [Plain(buffer)]))
+            card, buffer, failed = None, "", False
 
-            LarkMessageEvent.send_streaming = patched_send_streaming
-            logger.info("[lark_enhance] Streaming card patch applied successfully")
+        try:
+            async for chain in generator:
+                if not hasattr(chain, "chain"):
+                    continue
+                if getattr(chain, "type", None) == "break":
+                    await finish()
+                    continue
+                template = chain
+                text = "".join(
+                    component.text
+                    for component in chain.chain
+                    if isinstance(component, Plain)
+                )
+                if not text:
+                    continue
+                if card is None:
+                    card = LarkStreamingCard(
+                        event.bot,
+                        event.message_obj.group_id or event.get_sender_id(),
+                        event.message_obj.message_id,
+                    )
+                    if not await card.create_initial_card():
 
-        except ImportError as e:
-            logger.warning(f"[lark_enhance] Failed to import LarkMessageEvent: {e}")
-        except Exception as e:
-            logger.error(f"[lark_enhance] Failed to setup streaming patch: {e}")
+                        async def remaining(first=chain):
+                            yield first
+                            async for rest in generator:
+                                yield rest
+
+                        return await original_stream(remaining(), use_fallback)
+                buffer += text
+                if not failed and not await card.update_card(buffer):
+                    failed = True
+            await finish()
+            await AstrMessageEvent.send_streaming(
+                event, empty_generator(), use_fallback
+            )
+        except BaseException:
+            if card is not None:
+                await card.delete_card()
+            raise

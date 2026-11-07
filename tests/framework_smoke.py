@@ -7,7 +7,6 @@ real. Only outbound Feishu API calls are mocked; no credentials are required.
 from __future__ import annotations
 
 import asyncio
-import atexit
 import datetime
 import json
 import os
@@ -23,13 +22,18 @@ async def run_checks(runtime: Path) -> None:
     import lark_oapi as lark
 
     from astrbot.api.event import MessageChain, MessageEventResult
-    from astrbot.api.message_components import At, Plain
+    from astrbot.api.message_components import At, File, Plain
     from astrbot.api.platform import AstrBotMessage, MessageMember, MessageType
     from astrbot.api.provider import ProviderRequest
     from astrbot.core import astrbot_config, db_helper, sp
     from astrbot.core.config import VERSION
     from astrbot.core.platform.platform_metadata import PlatformMetadata
     from astrbot.core.platform.sources.lark.lark_event import LarkMessageEvent
+    from astrbot.core.message.message_event_result import ResultContentType
+    from astrbot.core.pipeline.respond.stage import RespondStage
+    from astrbot.builtin_stars.builtin_commands.commands.conversation import (
+        ConversationCommands,
+    )
     from astrbot.core.provider.register import llm_tools
     from astrbot.core.star.context import Context
     from astrbot.core.star.star import star_map
@@ -108,7 +112,7 @@ async def run_checks(runtime: Path) -> None:
         return LarkMessageEvent(
             text,
             message,
-            PlatformMetadata("lark", "framework test", "lark"),
+            PlatformMetadata("lark", "framework test", "lark_primary"),
             "oc_test",
             bot,
         )
@@ -228,6 +232,139 @@ async def run_checks(runtime: Path) -> None:
         )
         print("PASS native streaming permission failure falls back to normal sending")
 
+        # Exercise the actual RespondStage branch: it does not call after_message_sent.
+        async def mentioned_tokens():
+            for part in ("@", "张", "三", " 收到"):
+                yield MessageChain().message(part)
+
+        observed = event("om_observed")
+        await handler("on_message")(observed)
+        observed.set_result(
+            MessageEventResult()
+            .set_result_content_type(ResultContentType.STREAMING_RESULT)
+            .set_async_stream(mentioned_tokens())
+        )
+        stage = RespondStage()
+        stage.config = astrbot_config
+        before_updates = bot.cardkit.v1.card_element.acontent.await_count
+        await stage.process(observed)
+        updates = bot.cardkit.v1.card_element.acontent.await_args_list[before_updates:]
+        assert any(
+            '<at id="ou_test4ada"></at> 收到' in call.args[0].request_body.content
+            for call in updates
+        )
+        assert plugin.group_history["oc_test"][-1]["content"] == "@张三 收到"
+        count = len(plugin.group_history["oc_test"])
+        observed.set_result(
+            MessageEventResult(
+                chain=[Plain("@张三 收到")],
+                result_content_type=ResultContentType.STREAMING_FINISH,
+            )
+        )
+        await handler("on_decorating_result")(observed)
+        assert len(plugin.group_history["oc_test"]) == count
+        assert LarkMessageEvent.send_streaming is original_streaming
+        print(
+            "PASS real RespondStage streaming, split mentions, bot history, no duplicate finish record"
+        )
+
+        bot.cardkit.v1.card.acreate.return_value = response(code=41050)
+        fallback = event("om_observed_fallback")
+        await handler("on_message")(fallback)
+        before_replies = bot.im.v1.message.areply.await_count
+        await fallback.send_streaming(mentioned_tokens())
+        replies = bot.im.v1.message.areply.await_args_list[before_replies:]
+        assert any(
+            '"tag": "at"' in call.args[0].request_body.content
+            and "ou_test4ada" in call.args[0].request_body.content
+            for call in replies
+        )
+        bot.cardkit.v1.card.acreate.return_value = response(
+            SimpleNamespace(card_id="card_test")
+        )
+        print("PASS real native fallback restores At components in ordinary messages")
+
+        attachment = runtime / "attachment.txt"
+        attachment.write_text("offline attachment")
+        bot.im.v1.file.acreate = AsyncMock(
+            return_value=response(SimpleNamespace(file_key="file_test"))
+        )
+        bot.im.v1.message.apatch = AsyncMock(return_value=response())
+        bot.im.v1.message.adelete = AsyncMock(return_value=response())
+
+        async def media_tokens():
+            yield MessageChain().message("文件说明")
+            yield MessageChain(
+                chain=[File(file=str(attachment), name="attachment.txt")]
+            )
+
+        media_event = event("om_media")
+        await handler("on_message")(media_event)
+        before_replies = bot.im.v1.message.areply.await_count
+        await media_event.send_streaming(media_tokens())
+        replies = bot.im.v1.message.areply.await_args_list[before_replies:]
+        assert any(call.args[0].request_body.msg_type == "file" for call in replies)
+        assert bot.im.v1.file.acreate.await_count == 1
+        print("PASS real File component is uploaded and sent from a streaming response")
+
+        # Force only the plugin's capability choice; the real framework stays intact.
+        native_check = plugin._has_native_cardkit
+        plugin._has_native_cardkit = lambda _: False
+        try:
+            legacy = event("om_legacy")
+            await handler("on_message")(legacy)
+            before_patches = bot.im.v1.message.apatch.await_count
+            await legacy.send_streaming(mentioned_tokens())
+            assert bot.im.v1.message.apatch.await_count > before_patches
+            final_card = json.loads(
+                bot.im.v1.message.apatch.await_args.args[0].request_body.content
+            )
+            assert (
+                final_card["body"]["elements"][0]["content"]
+                == '<at id="ou_test4ada"></at> 收到'
+            )
+            bot.im.v1.message.apatch.return_value = response(code=41050)
+            failed = event("om_legacy_fallback")
+            await handler("on_message")(failed)
+            before_replies = bot.im.v1.message.areply.await_count
+            await failed.send_streaming(mentioned_tokens())
+            replies = bot.im.v1.message.areply.await_args_list[before_replies:]
+            assert any(call.args[0].request_body.msg_type == "post" for call in replies)
+            assert bot.im.v1.message.adelete.await_count >= 1
+        finally:
+            plugin._has_native_cardkit = native_check
+            bot.im.v1.message.apatch.return_value = response()
+        print("PASS real legacy card requests, failed update fallback and cleanup")
+
+        reset_event = event("om_reset", "/reset")
+        reset_event.role = "admin"
+        reset_config = {
+            "platform_settings": {"unique_session": False},
+            "provider_settings": {"agent_runner_type": "local"},
+            "agent_runner": {"runner_type": "local"},
+        }
+        reset_context = SimpleNamespace(
+            get_config=lambda **kwargs: reset_config,
+            get_using_provider=lambda *args: object(),
+            conversation_manager=SimpleNamespace(
+                get_curr_conversation_id=AsyncMock(return_value="test_conversation"),
+                update_conversation=AsyncMock(),
+            ),
+        )
+        plugin.group_history["oc_other"].append({"content": "保留其他群"})
+        await ConversationCommands(reset_context).reset(reset_event)
+        assert reset_event.get_extra("_clean_group_context_session")
+        await handler("on_message_sent")(reset_event)
+        assert not plugin.group_history["oc_test"]
+        assert plugin.group_history["oc_other"]
+        print(
+            "PASS actual framework reset flag, custom platform ID, other group isolation"
+        )
+
+        # Leave this write dirty: only production terminate() may flush it.
+        plugin._record_sent_text(incoming, "重载前最后一条")
+        assert plugin._pending_save
+
         success, error = await manager.reload("astrbot_plugin_lark_enhance")
         assert success, error
         reloaded = star_map[module_name].star_cls
@@ -236,12 +373,20 @@ async def run_checks(runtime: Path) -> None:
         assert {h.handler_name for h in handlers()} == expected_handlers
         assert len(handlers()) == len(expected_handlers)
         assert LarkMessageEvent.send_streaming is original_streaming
-        assert reloaded.group_history["oc_test"][-1]["content"] == "测试回复"
-        print("PASS PluginManager.reload, no duplicate handlers, history restored")
+        assert reloaded.group_history["oc_test"][-1]["content"] == "重载前最后一条"
+        assert plugin._closed and plugin._history_save_handle is None
+        reloaded._record_sent_text(incoming, "重载后的新历史")
+        reloaded._flush_pending_save()
+        latest = reloaded._history_file.read_text()
+        plugin._atexit_save()
+        assert reloaded._history_file.read_text() == latest
+        print(
+            "PASS PluginManager.reload, pending write flushed, old callback disabled, no duplicate handlers"
+        )
     finally:
         # The smoke runner owns these instances and the isolated database.
         for instance in instances:
-            atexit.unregister(instance._atexit_save)
+            await instance.terminate()
         if callable(getattr(sp, "close", None)):
             await sp.close()
         else:

@@ -15,7 +15,6 @@ class TextMixin:
         re.compile(r"__\s*(@[^\s_]+)\s*__"),
         re.compile(r"(?<!_)_\s*(@[^\s_]+)\s*_(?!_)"),
         re.compile(r"~~\s*(@[^\s~]+)\s*~~"),
-        re.compile(r"`\s*(@[^\s`]+)\s*`"),
     ]
 
     def _clean_content(self, content_str: str) -> str:
@@ -50,10 +49,22 @@ class TextMixin:
         if not data:
             return False
 
-        valid_types = {"text", "image", "at", "plain", "face", "record", "video", "file"}
+        valid_types = {
+            "text",
+            "image",
+            "at",
+            "plain",
+            "face",
+            "record",
+            "video",
+            "file",
+        }
         for item in data:
             if isinstance(item, dict) and "type" in item:
-                type_value = item.get("type", "").lower()
+                type_value = item.get("type")
+                if not isinstance(type_value, str):
+                    continue
+                type_value = type_value.lower()
                 if type_value in valid_types:
                     return True
 
@@ -74,7 +85,9 @@ class TextMixin:
             if "text" in data:
                 text_value = data["text"]
                 if isinstance(text_value, str):
-                    if text_value.strip().startswith("[") or text_value.strip().startswith("{"):
+                    if text_value.strip().startswith(
+                        "["
+                    ) or text_value.strip().startswith("{"):
                         return self._clean_content(text_value)
                     return text_value
                 return str(text_value)
@@ -97,7 +110,9 @@ class TextMixin:
             result = pattern.sub(r"\1", result)
         return result
 
-    def _get_mention_pattern(self, group_id: str, members_map: dict[str, str]) -> re.Pattern | None:
+    def _get_mention_pattern(
+        self, group_id: str, members_map: dict[str, str]
+    ) -> re.Pattern | None:
         """获取或创建 @ 提及匹配的正则表达式（带缓存）。"""
         if group_id in self._mention_pattern_cache:
             pattern, cache_time = self._mention_pattern_cache[group_id]
@@ -112,7 +127,11 @@ class TextMixin:
             return None
 
         escaped_names = [re.escape(name) for name in sorted_names]
-        pattern = re.compile(r"@(" + "|".join(escaped_names) + r")")
+        # Protect code/URLs and require a whole name, never a name prefix/email.
+        pattern = re.compile(
+            r"```[\s\S]*?```|`[^`\n]*`|https?://[^\s]+|"
+            r"(?<![A-Za-z0-9_./+@#%?=&:-])@(" + "|".join(escaped_names) + r")(?!\w)"
+        )
 
         self._mention_pattern_cache[group_id] = (pattern, time.time())
         return pattern

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import datetime
 import json
 from typing import Any
 
@@ -10,17 +9,29 @@ from astrbot.api.message_components import At, Plain
 from astrbot.api.provider import ProviderRequest
 from astrbot.core.message.message_event_result import ResultContentType
 
+from ..services.memory_policy import enabled_memory_types
+from ..stores.user_memory_store import MemoryPersistenceError
+
+
+def _read_memories(reader, *args, **kwargs):
+    try:
+        return reader(*args, **kwargs)
+    except MemoryPersistenceError as exc:
+        logger.error(f"[lark_enhance] Skipping unavailable memory: {exc}")
+        return []
+
 
 async def handle_on_message(plugin: Any, event: AstrMessageEvent):
     """监听飞书平台的所有消息事件。"""
-    logger.debug(
-        f"[lark_enhance] Processing message: {event.message_obj.message_id}"
-    )
+    logger.debug(f"[lark_enhance] Processing message: {event.message_obj.message_id}")
 
     lark_client = plugin._get_lark_client(event)
     if lark_client is None:
         logger.warning("[lark_enhance] lark_client is None")
         return
+
+    if hasattr(plugin, "_wrap_event_streaming"):
+        plugin._wrap_event_streaming(event)
 
     sender_id = event.get_sender_id()
     enable_real_name = plugin.config.get("enable_real_name", True)
@@ -71,9 +82,7 @@ async def handle_on_message(plugin: Any, event: AstrMessageEvent):
             time_str = plugin._format_history_time(
                 getattr(event.message_obj, "timestamp", None)
             )
-            sender_name = (
-                event.message_obj.sender.nickname or sender_id or "未知用户"
-            )
+            sender_name = event.message_obj.sender.nickname or sender_id or "未知用户"
             content_str = plugin._clean_content(event.message_str)
 
             if content_str:
@@ -104,7 +113,7 @@ async def handle_on_message(plugin: Any, event: AstrMessageEvent):
             logger.debug(
                 f"[lark_enhance] Found parent_id: {parent_id}, fetching quoted content..."
             )
-            result = await plugin._get_message_content(lark_client, parent_id)
+            result = await plugin._get_message_content(lark_client, parent_id, event)
 
             if result:
                 quoted_content, sender_name, quoted_images = result
@@ -125,57 +134,27 @@ async def handle_on_message_sent(plugin: Any, event: AstrMessageEvent):
 
     plugin._flush_pending_save()
 
-    if event.get_extra("_clean_ltm_session", False):
-        unified_msg_origin = event.unified_msg_origin
-        if unified_msg_origin:
-            plugin._clear_history_for_session(unified_msg_origin)
-
-    group_id = event.message_obj.group_id
-    if not group_id:
+    if event.get_extra("_clean_group_context_session", False) or event.get_extra(
+        "_clean_ltm_session", False
+    ):
+        group_id = event.message_obj.group_id
+        if group_id:
+            plugin._clear_history_for_group(group_id)
         return
 
-    history_count = plugin.config.get("history_inject_count", 20)
-    if not history_count or history_count <= 0:
-        return
-
-    try:
-        plugin._ensure_history_deque(group_id, history_count)
-
-        time_str = plugin._format_history_time()
-        sender_name = plugin.config.get("bot_name", "助手")
-
-        content_str = ""
-        result = event.get_result()
-        if result and result.chain:
-            texts = [c.text for c in result.chain if isinstance(c, Plain)]
-            content_str = "".join(texts)
-
-        if not content_str:
-            return
-
-        content_str = plugin._clean_content(content_str)
-        if not content_str:
-            return
-
-        msg_id = f"sent_{int(datetime.datetime.now().timestamp())}"
-        record_item = {
-            "msg_id": msg_id,
-            "time": time_str,
-            "sender": sender_name,
-            "sender_id": "__bot__",
-            "content": content_str,
-        }
-
-        plugin.group_history[group_id].append(record_item)
-        plugin._save_history()
-        logger.debug(
-            f"[lark_enhance] Recorded SELF message for group {group_id}: {content_str[:20]}..."
+    result = event.get_result()
+    if result and result.chain:
+        content = "".join(
+            c.text if isinstance(c, Plain) else f"@{c.name or c.qq} "
+            for c in result.chain
+            if isinstance(c, (Plain, At))
         )
-    except Exception as e:
-        logger.error(f"[lark_enhance] Failed to record self message history: {e}")
+        plugin._record_sent_text(event, content)
 
 
-async def handle_on_llm_request(plugin: Any, event: AstrMessageEvent, req: ProviderRequest):
+async def handle_on_llm_request(
+    plugin: Any, event: AstrMessageEvent, req: ProviderRequest
+):
     """在请求 LLM 前，将增强的信息注入到 prompt 中。"""
     if not plugin._is_lark_event(event):
         return
@@ -192,11 +171,11 @@ async def handle_on_llm_request(plugin: Any, event: AstrMessageEvent, req: Provi
         prompts_to_inject.append(
             "[记忆功能]\n"
             "你具有记忆信息的能力，支持两种范围：\n"
-            "- scope=\"user\"（默认）：个人记忆，仅对当前用户生效。用于记住用户个人信息（称呼、偏好、职业等）。\n"
-            "- scope=\"group\"：群记忆，对群内所有人生效。用于记住群相关信息（群规、项目背景、约定、群内通用知识等）。\n"
+            '- scope="user"（默认）：个人记忆，仅对当前用户生效。用于记住用户个人信息（称呼、偏好、职业等）。\n'
+            '- scope="group"：群记忆，对群内所有人生效。用于记住群相关信息（群规、项目背景、约定、群内通用知识等）。\n'
             "记忆类型 memory_type 支持：instruction / preference / fact / meme（群梗）。\n"
             "当用户要求记住信息时，根据信息性质选择合适的 scope 调用 lark_save_memory 工具。"
-            "当用户询问记忆时，使用 lark_list_memory 工具（支持 scope=\"all\"、memory_type 过滤）。"
+            '当用户询问记忆时，使用 lark_list_memory 工具（支持 scope="all"、memory_type 过滤）。'
             "当用户要求忘记信息时，使用 lark_forget_memory 工具（支持 memory_type 过滤）。"
         )
 
@@ -219,18 +198,20 @@ async def handle_on_llm_request(plugin: Any, event: AstrMessageEvent, req: Provi
                 info_parts = [f"群名称：{group_name}"]
                 if group_desc:
                     info_parts.append(f"群描述：{group_desc}")
-                prompts_to_inject.append(
-                    f"[当前群组信息]\n" + "\n".join(info_parts)
-                )
+                prompts_to_inject.append(f"[当前群组信息]\n" + "\n".join(info_parts))
 
     if plugin.config.get("enable_quoted_content", True):
         quoted_content = event.get_extra("lark_quoted_content")
         quoted_sender = event.get_extra("lark_quoted_sender")
         quoted_images = event.get_extra("lark_quoted_images") or []
-        quoted_image_count = len(quoted_images) if isinstance(quoted_images, list) else 0
+        quoted_image_count = (
+            len(quoted_images) if isinstance(quoted_images, list) else 0
+        )
 
         if quoted_content or quoted_image_count > 0:
-            logger.debug("[lark_enhance] Injecting quoted content into user prompt context.")
+            logger.debug(
+                "[lark_enhance] Injecting quoted content into user prompt context."
+            )
             if quoted_sender:
                 header = f"（用户回复了「{quoted_sender}」的消息"
             else:
@@ -278,24 +259,42 @@ async def handle_on_llm_request(plugin: Any, event: AstrMessageEvent, req: Provi
                     f"\n[当前群聊最近 {len(recent_history)} 条消息记录（仅供参考，不包含当前消息）]\n{history_str}\n"
                 )
 
-    if plugin.config.get("enable_user_memory", True) and group_id:
+    allowed_types = enabled_memory_types(plugin.config)
+    if allowed_types and group_id:
         inject_limit = plugin.config.get("memory_inject_limit", 10)
         sender_id = event.get_sender_id()
         if sender_id:
-            memories = plugin._memory_store.get_memories(group_id, sender_id, limit=inject_limit)
+            memories = _read_memories(
+                plugin._memory_store.get_memories,
+                group_id,
+                sender_id,
+                limit=inject_limit,
+                memory_types=allowed_types,
+            )
             if memories:
                 memory_str = plugin._memory_store.format_memories_for_prompt(memories)
                 sender_name = event.message_obj.sender.nickname or sender_id
                 prompts_to_inject.append(
                     f"[关于当前用户「{sender_name}」的记忆]\n{memory_str}"
                 )
-                logger.debug(f"[lark_enhance] Injected {len(memories)} memories for user {sender_id}")
+                logger.debug(
+                    f"[lark_enhance] Injected {len(memories)} memories for user {sender_id}"
+                )
 
-        group_memories = plugin._memory_store.get_group_memories(group_id, limit=inject_limit)
+        group_memories = _read_memories(
+            plugin._memory_store.get_group_memories,
+            group_id,
+            limit=inject_limit,
+            memory_types=allowed_types - {"meme"},
+        )
         if group_memories:
-            group_memory_str = plugin._memory_store.format_memories_for_prompt(group_memories)
+            group_memory_str = plugin._memory_store.format_memories_for_prompt(
+                group_memories
+            )
             prompts_to_inject.append(f"[关于当前群的记忆]\n{group_memory_str}")
-            logger.debug(f"[lark_enhance] Injected {len(group_memories)} group memories for {group_id}")
+            logger.debug(
+                f"[lark_enhance] Injected {len(group_memories)} group memories for {group_id}"
+            )
 
     if plugin.config.get("enable_vibe_sense", True) and group_id:
         vibe_label, vibe_strategy = plugin._analyze_group_vibe(group_id)
@@ -316,7 +315,8 @@ async def handle_on_llm_request(plugin: Any, event: AstrMessageEvent, req: Provi
 
     if plugin.config.get("enable_meme_memory", True) and group_id:
         meme_limit = plugin.config.get("memory_inject_limit", 10)
-        memes = plugin._memory_store.get_group_memories(
+        memes = _read_memories(
+            plugin._memory_store.get_group_memories,
             group_id=group_id,
             limit=meme_limit,
             memory_type="meme",
@@ -332,9 +332,9 @@ async def handle_on_llm_request(plugin: Any, event: AstrMessageEvent, req: Provi
         prompts_to_inject.append(
             "[群梗工具]\n"
             "当用户明确要求“记住这个梗/这个群梗是...”时，使用 lark_save_memory，"
-            "并设置 scope=\"group\"、memory_type=\"meme\"。"
-            "当用户要求查看群梗时，使用 lark_list_memory（scope=\"group\", memory_type=\"meme\"）。"
-            "当用户要求删除群梗时，使用 lark_forget_memory（scope=\"group\", memory_type=\"meme\"）。"
+            '并设置 scope="group"、memory_type="meme"。'
+            '当用户要求查看群梗时，使用 lark_list_memory（scope="group", memory_type="meme"）。'
+            '当用户要求删除群梗时，使用 lark_forget_memory（scope="group", memory_type="meme"）。'
         )
 
     if plugin.config.get("enable_human_rhythm", True):
@@ -352,11 +352,16 @@ async def handle_on_llm_request(plugin: Any, event: AstrMessageEvent, req: Provi
         )
         req.system_prompt = (req.system_prompt or "") + "\n\n" + final_inject
 
-    logger.info("=" * 20 + " [lark_enhance] LLM Request Payload " + "=" * 20)
-    logger.info(f"System Prompt:\n{req.system_prompt}")
-    logger.info(f"Contexts (History):\n{json.dumps(req.contexts, ensure_ascii=False, indent=2)}")
-    logger.info(f"Current Prompt:\n{req.prompt}")
-    logger.info("=" * 60)
+    logger.debug(
+        f"[lark_enhance] Request prepared: system_chars={len(req.system_prompt or '')}, "
+        f"prompt_chars={len(req.prompt or '')}, contexts={len(req.contexts or [])}"
+    )
+    if plugin.config.get("debug_log_payload", False):
+        logger.debug(f"[lark_enhance] System Prompt:\n{req.system_prompt}")
+        logger.debug(
+            f"[lark_enhance] Contexts:\n{json.dumps(req.contexts, ensure_ascii=False, default=str)}"
+        )
+        logger.debug(f"[lark_enhance] Current Prompt:\n{req.prompt}")
 
 
 async def handle_on_decorating_result(plugin: Any, event: AstrMessageEvent):
@@ -369,6 +374,10 @@ async def handle_on_decorating_result(plugin: Any, event: AstrMessageEvent):
         return
 
     if result.result_content_type == ResultContentType.STREAMING_FINISH:
+        # Older/custom framework paths may bypass on_message's stream observer.
+        if not event.get_extra("_lark_stream_history_recorded", False):
+            await handle_on_message_sent(plugin, event)
+            event.set_extra("_lark_stream_history_recorded", True)
         return
 
     cleaned_chain = []
@@ -423,11 +432,8 @@ async def handle_on_decorating_result(plugin: Any, event: AstrMessageEvent):
             if not open_id:
                 continue
 
-            before_text = text[last_end: match.start()]
+            before_text = text[last_end : match.start()]
             if before_text:
-                before_text = before_text.rstrip()
-                if before_text:
-                    before_text += " "
                 segments.append(Plain(before_text))
 
             segments.append(At(qq=open_id, name=name))
@@ -439,9 +445,8 @@ async def handle_on_decorating_result(plugin: Any, event: AstrMessageEvent):
 
         if last_end < len(text):
             after_text = text[last_end:]
-            after_text = after_text.lstrip()
             if after_text:
-                segments.append(Plain(" " + after_text))
+                segments.append(Plain(after_text))
 
         if segments:
             new_chain.extend(segments)
