@@ -283,3 +283,41 @@ async def lark_forget_memory(
 ---
 
 确认此方案后我开始实现。
+
+
+---
+
+## 9. 扩展：按用户隔离模式（memory_scope=user）
+
+### 9.1 动机
+
+原始设计（§1）明确限定"仅群聊场景"且"同一用户在不同群的记忆完全隔离"。
+实际使用中发现以下需求：
+
+- 私聊场景无法读取用户偏好（如称呼），体验割裂。
+- 同一用户的称呼等偏好应跨群统一，不应在 A 群叫"小王"、B 群叫"王总"。
+
+### 9.2 设计
+
+新增 `memory_scope` 配置（默认 `group`，不破坏现有行为）：
+
+| `memory_scope` | 个人记忆 key | 私聊 | 跨群 | 群记忆 |
+|----------------|-------------|------|------|--------|
+| `group`（默认）| `group_id` | ❌ | ❌ 隔离 | 不变 |
+| `user`          | `user_id`   | ✅ | ✅ 共享 | 不变 |
+
+### 9.3 实现
+
+- `UserMemoryStore` 的 `group_id` 参数本质是文件名 key，传 `user_id` 即可创建 `ou_*.json`，store 层无需改动。
+- `events.py` 注入逻辑：`memory_scope=user` 时 `get_memories(sender_id, sender_id)`。
+- `tools.py` 三函数：scope=user 时按 `memory_scope` 选择 key。
+- 旧数据兼容：`user` 模式下若用户文件不存在，自动 fallback 到群文件读取旧记忆。
+
+### 9.4 迁移
+
+从 `group` 切换到 `user` 时，运行迁移脚本将群文件中的 `users[]` 拆到各用户文件：
+
+```bash
+python3 tools/migrate_memory_scope.py <data_dir> --dry-run  # 预览
+python3 tools/migrate_memory_scope.py <data_dir> --backup    # 执行+备份
+```

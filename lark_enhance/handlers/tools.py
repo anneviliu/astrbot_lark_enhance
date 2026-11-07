@@ -168,9 +168,9 @@ async def handle_lark_save_memory(
     if not plugin.config.get("enable_user_memory", True):
         return "记忆功能未启用。"
 
+    sender_id = event.get_sender_id()
     group_id = event.message_obj.group_id
-    if not group_id:
-        return "记忆功能仅在群聊中可用。"
+    memory_scope = plugin.config.get("memory_scope", "group")
 
     valid_types = {"preference", "fact", "instruction", "meme"}
     if memory_type not in valid_types:
@@ -181,6 +181,8 @@ async def handle_lark_save_memory(
         return f"无效的记忆范围。请使用: {', '.join(valid_scopes)}"
 
     if scope == "group":
+        if not group_id:
+            return "群记忆仅在群聊中可用。"
         max_per_group = plugin.config.get("memory_max_per_group", 30)
         success = plugin._memory_store.add_group_memory(
             group_id=group_id,
@@ -190,13 +192,16 @@ async def handle_lark_save_memory(
         )
         scope_desc = "群记忆"
     else:
-        sender_id = event.get_sender_id()
+        # 个人记忆：memory_scope=user 时按用户隔离（跨群+私聊）；否则按群隔离（原行为）
+        memory_key = sender_id if memory_scope == "user" else group_id
+        if not memory_key:
+            return "记忆功能仅在群聊中可用。"
         if not sender_id:
             return "无法获取用户信息。"
 
         max_per_user = plugin.config.get("memory_max_per_user", 20)
         success = plugin._memory_store.add_memory(
-            group_id=group_id,
+            group_id=memory_key,
             user_id=sender_id,
             memory_type=memory_type,
             content=content,
@@ -221,9 +226,9 @@ async def handle_lark_list_memory(
     if not plugin.config.get("enable_user_memory", True):
         return "记忆功能未启用。"
 
+    sender_id = event.get_sender_id()
     group_id = event.message_obj.group_id
-    if not group_id:
-        return "记忆功能仅在群聊中可用。"
+    memory_scope = plugin.config.get("memory_scope", "group")
 
     valid_scopes = {"user", "group", "all"}
     if scope not in valid_scopes:
@@ -236,27 +241,29 @@ async def handle_lark_list_memory(
     results = []
 
     if scope in ("user", "all"):
-        sender_id = event.get_sender_id()
         if sender_id:
-            user_memories = plugin._memory_store.get_memories(
+            memory_key = sender_id if memory_scope == "user" else group_id
+            if memory_key:
+                user_memories = plugin._memory_store.get_memories(
+                    memory_key,
+                    sender_id,
+                    limit=50,
+                    memory_type=type_filter,
+                )
+                if user_memories:
+                    user_memory_str = plugin._memory_store.format_memories_for_prompt(user_memories)
+                    results.append(f"【个人记忆】\n{user_memory_str}")
+
+    if scope in ("group", "all"):
+        if group_id:
+            group_memories = plugin._memory_store.get_group_memories(
                 group_id,
-                sender_id,
                 limit=50,
                 memory_type=type_filter,
             )
-            if user_memories:
-                user_memory_str = plugin._memory_store.format_memories_for_prompt(user_memories)
-                results.append(f"【个人记忆】\n{user_memory_str}")
-
-    if scope in ("group", "all"):
-        group_memories = plugin._memory_store.get_group_memories(
-            group_id,
-            limit=50,
-            memory_type=type_filter,
-        )
-        if group_memories:
-            group_memory_str = plugin._memory_store.format_memories_for_prompt(group_memories)
-            results.append(f"【群记忆】\n{group_memory_str}")
+            if group_memories:
+                group_memory_str = plugin._memory_store.format_memories_for_prompt(group_memories)
+                results.append(f"【群记忆】\n{group_memory_str}")
 
     if not results:
         if scope == "user":
@@ -281,9 +288,9 @@ async def handle_lark_forget_memory(
     if not plugin.config.get("enable_user_memory", True):
         return "记忆功能未启用。"
 
+    sender_id = event.get_sender_id()
     group_id = event.message_obj.group_id
-    if not group_id:
-        return "记忆功能仅在群聊中可用。"
+    memory_scope = plugin.config.get("memory_scope", "group")
 
     valid_scopes = {"user", "group"}
     if scope not in valid_scopes:
@@ -294,6 +301,8 @@ async def handle_lark_forget_memory(
     type_filter = None if memory_type == "all" else memory_type
 
     if scope == "group":
+        if not group_id:
+            return "群记忆仅在群聊中可用。"
         deleted_count = plugin._memory_store.delete_group_memories(
             group_id,
             target,
@@ -301,11 +310,13 @@ async def handle_lark_forget_memory(
         )
         scope_desc = "群记忆"
     else:
-        sender_id = event.get_sender_id()
         if not sender_id:
             return "无法获取用户信息。"
+        memory_key = sender_id if memory_scope == "user" else group_id
+        if not memory_key:
+            return "记忆功能仅在群聊中可用。"
         deleted_count = plugin._memory_store.delete_memories(
-            group_id,
+            memory_key,
             sender_id,
             target,
             memory_type=type_filter,

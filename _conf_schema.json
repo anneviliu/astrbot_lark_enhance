@@ -59,6 +59,11 @@
         "type": "int",
         "default": 20
     },
+    "memory_scope": {
+        "description": "个人记忆作用域：group=按群隔离（默认，原行为）；user=按用户隔离（跨群共享且支持私聊）",
+        "type": "string",
+        "default": "group"
+    },
     "memory_max_per_group": {
         "description": "每个群最多保存的群维度记忆条数",
         "type": "int",
